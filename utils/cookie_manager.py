@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 from typing import List, Dict, Optional
 from utils.paths import cookies_dir
-from utils.cookie_handler import convert_cookie_editor_to_playwright, convert_kv_to_playwright
+from utils.cookie_handler import auto_convert_to_playwright
 from utils.common import clean_env_value
 
 @dataclass
@@ -144,29 +144,59 @@ class CookieManager:
         return cookies
 
     def _load_from_file(self, filename: str) -> List[Dict]:
-        """从JSON文件加载 Cookie"""
+        """从文件加载 Cookie，自动识别 JSON 或 KV 格式"""
         cookie_path = cookies_dir() / filename
 
         if not os.path.exists(cookie_path):
             raise FileNotFoundError(f"Cookie 文件不存在: {cookie_path}")
 
         with open(cookie_path, 'r', encoding='utf-8') as f:
-            cookies_from_file = json.load(f)
+            file_content = f.read().strip()
 
-        return convert_cookie_editor_to_playwright(cookies_from_file, logger=self.logger)
+        # 尝试解析为 JSON
+        try:
+            cookies_from_file = json.loads(file_content)
+            # JSON 解析成功，使用自动转换函数
+            return auto_convert_to_playwright(
+                cookies_from_file,
+                default_domain=".google.com",
+                logger=self.logger
+            )
+        except json.JSONDecodeError:
+            # JSON 解析失败，当作 KV 格式处理
+            if self.logger:
+                self.logger.info(f"文件 {filename} 不是有效的 JSON 格式，尝试作为 KV 格式解析")
+            return auto_convert_to_playwright(
+                file_content,
+                default_domain=".google.com",
+                logger=self.logger
+            )
 
     def _load_from_env(self, env_var_name: str) -> List[Dict]:
-        """从环境变量加载 Cookie"""
+        """从环境变量加载 Cookie，自动识别 JSON 或 KV 格式"""
         env_value = clean_env_value(os.getenv(env_var_name))
 
         if not env_value:
             raise ValueError(f"环境变量 {env_var_name} 不存在或为空")
 
-        return convert_kv_to_playwright(
-            env_value,
-            default_domain=".google.com",
-            logger=self.logger
-        )
+        # 尝试解析为 JSON
+        try:
+            cookies_from_env = json.loads(env_value)
+            # JSON 解析成功，使用自动转换函数
+            return auto_convert_to_playwright(
+                cookies_from_env,
+                default_domain=".google.com",
+                logger=self.logger
+            )
+        except json.JSONDecodeError:
+            # JSON 解析失败，当作 KV 格式处理
+            if self.logger:
+                self.logger.debug(f"环境变量 {env_var_name} 不是有效的 JSON 格式，作为 KV 格式解析")
+            return auto_convert_to_playwright(
+                env_value,
+                default_domain=".google.com",
+                logger=self.logger
+            )
 
     def get_all_sources(self) -> List[CookieSource]:
         """获取所有检测到的 Cookie 来源"""

@@ -95,3 +95,53 @@ def convert_kv_to_playwright(kv_string, default_domain=".google.com", logger=Non
             logger.debug(f"成功转换 Cookie: {name} -> domain={default_domain}")
 
     return playwright_cookies
+
+
+def auto_convert_to_playwright(cookie_data, default_domain=".google.com", logger=None):
+    """
+    自动识别 Cookie 数据格式并转换为 Playwright 兼容格式。
+    支持两种输入格式:
+    1. JSON 数组 (Cookie-Editor 导出格式)
+    2. KV 字符串 (键值对格式: "name1=value1; name2=value2; ...")
+
+    Args:
+        cookie_data: Cookie 数据，可以是 list (JSON格式) 或 str (KV格式)
+        default_domain (str): KV格式使用的默认域名，默认为".google.com"
+        logger: 日志记录器
+
+    Returns:
+        list: Playwright 兼容的 Cookie 列表
+
+    Raises:
+        ValueError: 当格式无法识别时抛出异常
+    """
+    # 格式1: JSON 数组格式 (Cookie-Editor 导出格式)
+    if isinstance(cookie_data, list):
+        if logger:
+            logger.debug(f"检测到 JSON 数组格式的 Cookie 数据，共 {len(cookie_data)} 个条目")
+        return convert_cookie_editor_to_playwright(cookie_data, logger=logger)
+
+    # 格式2: KV 字符串格式
+    if isinstance(cookie_data, str):
+        # 去除首尾空白字符
+        cookie_str = cookie_data.strip()
+
+        if not cookie_str:
+            if logger:
+                logger.warning("收到空的 Cookie 字符串")
+            return []
+
+        if logger:
+            logger.debug(f"检测到 KV 字符串格式的 Cookie 数据")
+
+        return convert_kv_to_playwright(
+            cookie_str,
+            default_domain=default_domain,
+            logger=logger
+        )
+
+    # 无法识别的格式
+    error_msg = f"无法识别的 Cookie 数据格式: {type(cookie_data).__name__}"
+    if logger:
+        logger.error(error_msg)
+    raise ValueError(error_msg)
