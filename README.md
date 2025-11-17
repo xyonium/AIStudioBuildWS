@@ -20,7 +20,13 @@ CLIProxyAPI 自 v6.3.x 版本起，开始支持通过 WebSocket 方式接入 AI 
 
 ### 第二步：准备 AIStudio Cookie
 
-这一步推荐使用浏览器的隐私模式，登录 https://aistudio.google.com/ ，在浏览器的开发者工具中复制 Cookie 即可，具体位置如下图所示：
+Cookie 可以通过两种方式获取，两种方式选一种即可，推荐使用指纹浏览器方式获取：
+
+第一种方式：使用 AdsPower 指纹浏览器，登录 https://aistudio.google.com/ ，退出后编辑浏览器环境，复制 Cookie 内容，具体如下图所示：
+
+![](https://img.072899.xyz/2025/11/c60399120703a24bdd450d38e31052a5.png)
+
+第二种方式：通过 Chrome 等普通浏览器的隐私模式，登录 https://aistudio.google.com/ ，在浏览器的开发者工具中复制 Cookie 内容，具体位置如下图所示：
 
 ![](https://img.072899.xyz/2025/11/51f860bf363cab01aa4c3fd5181b7f72.png)
 
