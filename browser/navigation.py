@@ -1,5 +1,6 @@
 import time
 import os
+import threading
 from playwright.sync_api import Page, expect
 from utils.paths import logs_dir
 from utils.common import ensure_dir
@@ -24,7 +25,7 @@ def handle_untrusted_dialog(page: Page, logger=None):
     except Exception as e:
         logger.info(f"检查弹窗时发生意外：{e}，将继续执行...")
 
-def handle_successful_navigation(page: Page, logger, cookie_file_config):
+def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdown_event=None):
     """
     在成功导航到目标页面后，执行后续操作（处理弹窗、保持运行）。
     """
@@ -40,9 +41,21 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config):
 
     logger.info("实例将保持运行状态。每10秒点击一次页面以保持活动。")
     while True:
+        # 检查是否收到关闭信号
+        if shutdown_event and shutdown_event.is_set():
+            logger.info("收到关闭信号，正在优雅退出保持活动循环...")
+            break
+
         try:
             page.click('body')
-            time.sleep(10)
+
+            # 使用可中断的睡眠，每秒检查一次关闭信号
+            for _ in range(10):  # 10秒 = 10次1秒检查
+                if shutdown_event and shutdown_event.is_set():
+                    logger.info("收到关闭信号，正在优雅退出保持活动循环...")
+                    return
+                time.sleep(1)
+
         except Exception as e:
             logger.error(f"在保持活动循环中出错: {e}")
             # 在保持活动循环中出错时截屏

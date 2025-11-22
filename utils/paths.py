@@ -6,8 +6,7 @@ from pathlib import Path
 @lru_cache(maxsize=1)
 def project_root() -> Path:
     """
-    Return the repository root so callers can build absolute paths that do not
-    depend on the current working directory.
+    返回代码仓库根目录，使调用者能够构建不依赖当前工作目录的绝对路径。
     """
     env_root = os.getenv("CAMOUFOX_PROJECT_ROOT")
     if env_root:
@@ -18,15 +17,15 @@ def project_root() -> Path:
         if (parent / "cookies").exists():
             return parent
 
-    # Fallback to the original behaviour if the marker directory is missing.
+    # 如果标记目录缺失，则回退到原始行为
     return current.parents[min(2, len(current.parents) - 1)]
 
 
 def logs_dir() -> Path:
-    """Root-level directory that stores log files and screenshots."""
+    """存储日志文件和截图的根级目录。"""
     return project_root() / "logs"
 
 
 def cookies_dir() -> Path:
-    """Root-level directory that stores persistent cookie JSON files."""
+    """存储持久化Cookie JSON文件的根级目录。"""
     return project_root() / "cookies"

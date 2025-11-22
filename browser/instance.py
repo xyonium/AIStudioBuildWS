@@ -1,4 +1,6 @@
 import os
+import threading
+import signal
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
 from utils.logger import setup_logging
 from utils.cookie_manager import CookieManager
@@ -7,6 +9,20 @@ from camoufox.sync_api import Camoufox
 from utils.paths import logs_dir
 from utils.common import parse_headless_mode, ensure_dir
 from utils.url_helper import extract_url_path
+
+# 全局关闭事件，用于优雅地关闭浏览器实例
+shutdown_event = threading.Event()
+
+
+def signal_handler_instance(signum, frame):
+    """实例级别的信号处理器"""
+    shutdown_event.set()
+
+
+# 注释掉实例级别的信号处理器注册，避免覆盖主进程的信号处理器
+# 子进程应该通过 shutdown_event 来响应关闭信号，而不是直接处理信号
+# signal.signal(signal.SIGTERM, signal_handler_instance)
+# signal.signal(signal.SIGINT, signal_handler_instance)
 
 
 def run_browser_instance(config):
@@ -57,7 +73,7 @@ def run_browser_instance(config):
         logger.info(f"使用代理: {proxy} 访问")
         launch_options["proxy"] = {"server": proxy, "bypass": "localhost, 127.0.0.1"}
     # 无需禁用图片加载, 因为图片很少, 禁用还可能导致风控增加
-    # launch_options["block_images"] = True
+    # launch_options["block_images"] = True  # 禁用图片加载
     
     screenshot_dir = logs_dir()
     ensure_dir(screenshot_dir)
@@ -151,28 +167,27 @@ def run_browser_instance(config):
             final_path = extract_url_path(final_url)
 
             if expected_path and expected_path in final_path:
-                logger.info(f"URL验证通过。预期路径: {expected_path}, 最终URL: {final_url}")
+                logger.info(f"URL验证通过。预期路径: {expected_path}")
 
-                # --- NEW ROBUST STRATEGY: Wait for the loading spinner to disappear ---
-                # This is the key to solving the race condition. The error message or
-                # content will only appear AFTER the initial loading is done.
+                # --- 新的健壮策略：等待加载指示器消失 ---
+                # 这是解决竞态条件的关键。错误消息或内容只在初始加载完成后才会出现。
                 spinner_locator = page.locator('mat-spinner')
                 try:
                     logger.info("正在等待加载指示器 (spinner) 消失... (最长等待30秒)")
-                    # We wait for the spinner to be 'hidden' or not present in the DOM.
+                    # 我们等待spinner变为'隐藏'状态或从DOM中消失。
                     spinner_locator.wait_for(state='hidden', timeout=30000)
                     logger.info("加载指示器已消失。页面已完成异步加载。")
                 except TimeoutError:
                     logger.error("页面加载指示器在30秒内未消失。页面可能已卡住。")
                     page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_spinner_stuck_{diagnostic_tag}.png"))
-                    return # Exit if the page is stuck loading
+                    return # 如果页面加载卡住则退出
 
-                # --- NOW, we can safely check for the error message ---
-                # We use the most specific text possible to avoid false positives.
+                # --- 现在我们可以安全地检查错误消息 ---
+                # 我们使用最具体的文本以避免误判。
                 auth_error_text = "authentication error"
                 auth_error_locator = page.get_by_text(auth_error_text, exact=False)
 
-                # We only need a very short timeout here because the page should be stable.
+                # 这里我们只需要很短的超时时间，因为页面应该是稳定的。
                 if auth_error_locator.is_visible(timeout=2000):
                     logger.error(f"检测到认证失败的错误横幅: '{auth_error_text}'. Cookie已过期或无效。")
                     screenshot_path = os.path.join(screenshot_dir, f"FAIL_auth_error_banner_{diagnostic_tag}.png")
@@ -182,9 +197,9 @@ def run_browser_instance(config):
                     # with open(html_path, 'w', encoding='utf-8') as f:
                     #     f.write(page.content())
                     # logger.info(f"已保存包含错误信息的页面HTML: {html_path}")
-                    return # Definitive failure, so we exit.
+                    return # 明确的失败，因此我们退出。
 
-                # --- If no error, proceed to final confirmation (as a fallback) ---
+                # --- 如果没有错误，进行最终确认（作为后备方案） ---
                 logger.info("未检测到认证错误横幅。进行最终确认。")
                 login_button_cn = page.get_by_role('button', name='登录')
                 login_button_en = page.get_by_role('button', name='Login')
@@ -194,9 +209,9 @@ def run_browser_instance(config):
                     page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_login_button_visible_{diagnostic_tag}.png"))
                     return
 
-                # --- If all checks pass, we assume success ---
+                # --- 如果所有检查都通过，我们假设成功 ---
                 logger.info("所有验证通过，确认已成功登录。")
-                handle_successful_navigation(page, logger, diagnostic_tag)
+                handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event)
             elif "accounts.google.com/v3/signin/accountchooser" in final_url:
                 logger.warning("检测到Google账户选择页面。登录失败或Cookie已过期。")
                 page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_chooser_click_failed_{diagnostic_tag}.png"))
