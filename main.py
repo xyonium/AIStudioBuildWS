@@ -24,6 +24,7 @@ class ProcessManager:
     def __init__(self):
         self.processes = {}  # {process_id: process_info}
         self.lock = threading.RLock()
+        ensure_dir(logs_dir())
         self.logger = setup_logging(str(logs_dir() / 'app.log'), prefix="manager")
 
     def add_process(self, process, config=None):
