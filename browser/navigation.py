@@ -1,6 +1,5 @@
 import time
 import os
-import threading
 from playwright.sync_api import Page, expect
 from utils.paths import logs_dir
 from utils.common import ensure_dir
@@ -25,7 +24,7 @@ def handle_untrusted_dialog(page: Page, logger=None):
     except Exception as e:
         logger.info(f"检查弹窗时发生意外：{e}，将继续执行...")
 
-def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdown_event=None):
+def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdown_event=None, cookie_validator=None):
     """
     在成功导航到目标页面后，执行后续操作（处理弹窗、保持运行）。
     """
@@ -35,29 +34,52 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
     # 检查并处理 "Last modified by..." 的弹窗
     handle_untrusted_dialog(page, logger=logger)
 
+    logger.info("实例将保持运行状态。每10秒点击一次页面以保持活动。")
+
     # 等待页面加载和渲染
-    logger.info("等待15秒以便页面完全渲染...")
     time.sleep(15)
 
-    logger.info("实例将保持运行状态。每10秒点击一次页面以保持活动。")
+    # 添加Cookie验证计数器
+    click_counter = 0
+
     while True:
         # 检查是否收到关闭信号
         if shutdown_event and shutdown_event.is_set():
             logger.info("收到关闭信号，正在优雅退出保持活动循环...")
+            # 停止Cookie验证器
+            if cookie_validator:
+                cookie_validator.stop_validation()
             break
 
         try:
             page.click('body')
+            click_counter += 1
+
+            # 每360次点击（1小时）执行一次完整的Cookie验证
+            if cookie_validator and click_counter >= 360:  # 360 * 10秒 = 3600秒 = 1小时
+                is_valid = cookie_validator.validate_cookies_in_main_thread()
+
+                if not is_valid:
+                    cookie_validator.shutdown_instance_on_cookie_failure()
+                    return
+
+                click_counter = 0  # 重置计数器
 
             # 使用可中断的睡眠，每秒检查一次关闭信号
             for _ in range(10):  # 10秒 = 10次1秒检查
                 if shutdown_event and shutdown_event.is_set():
                     logger.info("收到关闭信号，正在优雅退出保持活动循环...")
+                    # 停止Cookie验证器
+                    if cookie_validator:
+                        cookie_validator.stop_validation()
                     return
                 time.sleep(1)
 
         except Exception as e:
             logger.error(f"在保持活动循环中出错: {e}")
+            # 停止Cookie验证器
+            if cookie_validator:
+                cookie_validator.stop_validation()
             # 在保持活动循环中出错时截屏
             try:
                 screenshot_dir = logs_dir()

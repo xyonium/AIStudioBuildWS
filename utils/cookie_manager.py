@@ -1,6 +1,6 @@
 """
 统一的Cookie管理器
-整合JSON文件和环境变量cookie的检测、加载和管理功能
+整合JSON文件和环境变量Cookie的检测、加载和管理功能
 """
 
 import os
@@ -26,7 +26,7 @@ class CookieSource:
 class CookieManager:
     """
     统一的Cookie管理器
-    负责检测、加载和缓存所有来源的cookie数据
+    负责检测、加载和缓存所有来源的Cookie数据
     """
 
     def __init__(self, logger=None):
@@ -36,7 +36,7 @@ class CookieManager:
 
     def detect_all_sources(self) -> List[CookieSource]:
         """
-        检测所有可用的cookie来源（JSON文件 + 环境变量）
+        检测所有可用的Cookie来源（JSON文件 + 环境变量）
         结果会被缓存，避免重复扫描
         """
         if self._detected_sources is not None:
@@ -44,7 +44,7 @@ class CookieManager:
 
         sources = []
 
-        # 1. 扫描cookies目录中的JSON文件
+        # 1. 扫描Cookies目录中的JSON文件
         try:
             cookie_path = cookies_dir()
             if os.path.isdir(cookie_path):
@@ -61,7 +61,7 @@ class CookieManager:
                 if cookie_files and self.logger:
                     self.logger.info(f"发现 {len(cookie_files)} 个 Cookie 文件")
                 elif self.logger:
-                    self.logger.info(f"在 {cookie_path} 目录下未找到任何 .json 格式的 Cookie 文件")
+                    self.logger.info(f"在 {cookie_path} 目录下未找到任何格式的 Cookie 文件")
             else:
                 if self.logger:
                     self.logger.error(f"Cookie 目录不存在: {cookie_path}")
@@ -102,7 +102,7 @@ class CookieManager:
 
     def load_cookies(self, source: CookieSource) -> List[Dict]:
         """
-        从指定来源加载cookie数据
+        从指定来源加载Cookie数据
 
         Args:
             source: Cookie来源对象
@@ -197,35 +197,3 @@ class CookieManager:
                 default_domain=".google.com",
                 logger=self.logger
             )
-
-    def get_all_sources(self) -> List[CookieSource]:
-        """获取所有检测到的 Cookie 来源"""
-        return self.detect_all_sources()
-
-    def clear_cache(self):
-        """清空 Cookie 缓存"""
-        self._cookie_cache.clear()
-        if self.logger:
-            self.logger.debug("Cookie 缓存已清空")
-
-    def get_source_summary(self) -> Dict[str, int]:
-        """
-        获取 Cookie 来源统计信息
-
-        Returns:
-            包含各类型来源数量的字典
-        """
-        sources = self.detect_all_sources()
-        summary = {
-            "total": len(sources),
-            "files": 0,
-            "env_vars": 0
-        }
-
-        for source in sources:
-            if source.type == "file":
-                summary["files"] += 1
-            elif source.type == "env_var":
-                summary["env_vars"] += 1
-
-        return summary

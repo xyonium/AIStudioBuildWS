@@ -9,4 +9,4 @@ services:
     volumes:
       - ./cookies:/app/cookies:rw
       - ./logs:/app/logs:rw
-    restart: unless-stopped
+    restart: on-failure

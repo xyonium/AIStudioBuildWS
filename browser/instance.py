@@ -1,35 +1,26 @@
 import os
-import threading
 import signal
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
 from utils.logger import setup_logging
 from utils.cookie_manager import CookieManager
 from browser.navigation import handle_successful_navigation
+from browser.cookie_validator import CookieValidator
 from camoufox.sync_api import Camoufox
 from utils.paths import logs_dir
 from utils.common import parse_headless_mode, ensure_dir
 from utils.url_helper import extract_url_path
 
-# 全局关闭事件，用于优雅地关闭浏览器实例
-shutdown_event = threading.Event()
 
-
-def signal_handler_instance(signum, frame):
-    """实例级别的信号处理器"""
-    shutdown_event.set()
-
-
-# 注释掉实例级别的信号处理器注册，避免覆盖主进程的信号处理器
-# 子进程应该通过 shutdown_event 来响应关闭信号，而不是直接处理信号
-# signal.signal(signal.SIGTERM, signal_handler_instance)
-# signal.signal(signal.SIGINT, signal_handler_instance)
-
-
-def run_browser_instance(config):
+def run_browser_instance(config, shutdown_event=None):
     """
     根据最终合并的配置，启动并管理一个单独的 Camoufox 浏览器实例。
-    使用CookieManager统一管理cookie加载，避免重复的扫描逻辑。
+    使用CookieManager统一管理Cookie加载，避免重复的扫描逻辑。
     """
+    # 重置信号处理器，确保子进程能响应 SIGTERM
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    # 忽略 SIGINT (Ctrl+C)，让主进程统一处理
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     cookie_source = config.get('cookie_source')
     if not cookie_source:
         # 使用默认logger进行错误报告
@@ -47,33 +38,33 @@ def run_browser_instance(config):
     proxy = config.get('proxy')
     headless_setting = config.get('headless', 'virtual')
 
-    # 使用CookieManager加载cookie
+    # 使用CookieManager加载Cookie
     cookie_manager = CookieManager(logger)
     all_cookies = []
 
     try:
-        # 直接使用CookieSource对象加载cookie
+        # 直接使用CookieSource对象加载Cookie
         cookies = cookie_manager.load_cookies(cookie_source)
         all_cookies.extend(cookies)
 
     except Exception as e:
-        logger.error(f"从cookie来源加载时出错: {e}")
+        logger.error(f"从Cookie来源加载时出错: {e}")
         return
 
-    # 3. 检查是否有任何cookie可用
+    # 3. 检查是否有任何Cookie可用
     if not all_cookies:
-        logger.error("错误: 没有可用的cookie（既没有有效的JSON文件，也没有环境变量）")
+        logger.error("错误: 没有可用的Cookie（既没有有效的JSON文件，也没有环境变量）")
         return
 
     cookies = all_cookies
 
     headless_mode = parse_headless_mode(headless_setting)
     launch_options = {"headless": headless_mode}
+    # launch_options["block_images"] = True  # 禁用图片加载
+    
     if proxy:
         logger.info(f"使用代理: {proxy} 访问")
         launch_options["proxy"] = {"server": proxy, "bypass": "localhost, 127.0.0.1"}
-    # 无需禁用图片加载, 因为图片很少, 禁用还可能导致风控增加
-    # launch_options["block_images"] = True  # 禁用图片加载
     
     screenshot_dir = logs_dir()
     ensure_dir(screenshot_dir)
@@ -83,16 +74,19 @@ def run_browser_instance(config):
             context = browser.new_context()
             context.add_cookies(cookies)
             page = context.new_page()
-            
+
+            # 创建Cookie验证器
+            cookie_validator = CookieValidator(page, context, logger, instance_label)
+
             # ####################################################################
             # ############ 增强的 page.goto() 错误处理和日志记录 ###############
             # ####################################################################
             
             response = None
             try:
-                logger.info(f"正在导航到: {expected_url} (超时设置为 120 秒)")
+                logger.info(f"正在导航到: {expected_url} (超时设置为 90 秒)")
                 # page.goto() 会返回一个 response 对象，我们可以用它来获取状态码等信息
-                response = page.goto(expected_url, wait_until='domcontentloaded', timeout=120000)
+                response = page.goto(expected_url, wait_until='domcontentloaded', timeout=90000)
                 
                 # 检查HTTP响应状态码
                 if response:
@@ -211,7 +205,11 @@ def run_browser_instance(config):
 
                 # --- 如果所有检查都通过，我们假设成功 ---
                 logger.info("所有验证通过，确认已成功登录。")
-                handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event)
+
+                # 创建Cookie验证器（验证将在主线程中执行，避免线程问题）
+                logger.info("Cookie验证器已创建，将定期验证Cookie有效性")
+
+                handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator)
             elif "accounts.google.com/v3/signin/accountchooser" in final_url:
                 logger.warning("检测到Google账户选择页面。登录失败或Cookie已过期。")
                 page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_chooser_click_failed_{diagnostic_tag}.png"))
@@ -226,6 +224,21 @@ def run_browser_instance(config):
 
     except KeyboardInterrupt:
         logger.info(f"用户中断，正在关闭...")
+        # 停止Cookie验证器
+        if 'cookie_validator' in locals():
+            cookie_validator.stop_validation()
+    except SystemExit as e:
+        # 捕获Cookie验证失败时的系统退出
+        if e.code == 1:
+            logger.error("Cookie验证失败，关闭进程实例")
+        else:
+            logger.info(f"实例正常退出，退出码: {e.code}")
+        # 停止Cookie验证器
+        if 'cookie_validator' in locals():
+            cookie_validator.stop_validation()
     except Exception as e:
         # 这是一个最终的捕获，用于捕获所有未预料到的错误
         logger.exception(f"运行 Camoufox 实例时发生未预料的严重错误: {e}")
+        # 停止Cookie验证器
+        if 'cookie_validator' in locals():
+            cookie_validator.stop_validation()

@@ -5,7 +5,7 @@ import signal
 import sys
 import time
 
-from browser.instance import run_browser_instance, shutdown_event as instance_shutdown_event
+from browser.instance import run_browser_instance
 from utils.logger import setup_logging
 from utils.paths import cookies_dir, logs_dir
 from utils.cookie_manager import CookieManager
@@ -14,6 +14,8 @@ from utils.common import clean_env_value, ensure_dir
 # 全局变量
 app_running = False
 flask_app = None
+# 使用 multiprocessing.Event 实现跨进程通信
+shutdown_event = multiprocessing.Event()
 
 
 class ProcessManager:
@@ -21,7 +23,8 @@ class ProcessManager:
 
     def __init__(self):
         self.processes = {}  # {process_id: process_info}
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.logger = setup_logging(str(logs_dir() / 'app.log'), prefix="manager")
 
     def add_process(self, process, config=None):
         """添加进程到管理器"""
@@ -32,8 +35,7 @@ class ProcessManager:
             if pid is None:
                 # 使用临时ID作为key，等获得真实PID后再更新
                 temp_id = f"temp_{len(self.processes)}"
-                logger = setup_logging(str(logs_dir() / 'app.log'), prefix="manager")
-                logger.warning(f"进程PID暂时为None，使用临时ID {temp_id}")
+                self.logger.warning(f"进程PID暂时为None，使用临时ID {temp_id}")
             else:
                 temp_id = pid
 
@@ -66,12 +68,6 @@ class ProcessManager:
             if pid in self.processes:
                 del self.processes[pid]
 
-    def mark_dead(self, pid):
-        """标记进程为已死亡"""
-        with self.lock:
-            if pid in self.processes:
-                self.processes[pid]['is_alive'] = False
-
     def get_alive_processes(self):
         """获取所有存活进程"""
         with self.lock:
@@ -89,9 +85,10 @@ class ProcessManager:
                         alive.append(process)
                     else:
                         dead_pids.append(pid)
-                except (ValueError, ProcessLookupError):
+                except (ValueError, ProcessLookupError) as e:
                     # 进程已经不存在
                     dead_pids.append(pid)
+                    self.logger.warning(f"进程 {pid} 检查时出错: {e}")
 
             # 清理死进程记录
             for pid in dead_pids:
@@ -102,16 +99,17 @@ class ProcessManager:
     def terminate_all(self, timeout=10):
         """优雅地终止所有进程"""
         with self.lock:
-            logger = setup_logging(str(logs_dir() / 'app.log'), prefix="signal")
+            # logger = setup_logging(str(logs_dir() / 'app.log'), prefix="signal")
+            # 直接使用 self.logger，避免重复 setup_logging
 
             # 首先更新临时PID
             self.update_temp_pids()
 
             if not self.processes:
-                logger.info("没有活跃的进程需要关闭")
+                self.logger.info("没有活跃的进程需要关闭")
                 return
 
-            logger.info(f"开始关闭 {len(self.processes)} 个进程...")
+            self.logger.info(f"开始关闭 {len(self.processes)} 个进程...")
 
             # 第一阶段：发送SIGTERM信号
             active_pids = []
@@ -120,21 +118,22 @@ class ProcessManager:
                 try:
                     # 检查进程对象是否有效且进程存活
                     if process and hasattr(process, 'is_alive') and process.is_alive() and pid is not None:
-                        logger.info(f"发送SIGTERM给进程 {pid} (运行时长: {time.time() - info['start_time']:.1f}秒)")
+                        self.logger.info(f"发送SIGTERM给进程 {pid} (运行时长: {time.time() - info['start_time']:.1f}秒)")
                         process.terminate()
                         active_pids.append(pid)
                     else:
-                        logger.info(f"进程 {pid if pid is not None else 'None'} 已经停止或无效")
+                        self.logger.info(f"进程 {pid if pid is not None else 'None'} 已经停止或无效")
                 except (ValueError, ProcessLookupError, AttributeError) as e:
-                    logger.warning(f"进程 {pid if pid is not None else 'None'} 访问出错: {e}")
+                    self.logger.warning(f"进程 {pid if pid is not None else 'None'} 访问出错: {e}")
 
             if not active_pids:
-                logger.info("所有进程已经停止")
+                self.logger.info("所有进程已经停止")
                 return
 
             # 第二阶段：等待进程退出
-            logger.info(f"等待 {len(active_pids)} 个进程优雅退出...")
-            for i in range(5):  # 最多等待5秒
+            self.logger.info(f"等待 {len(active_pids)} 个进程优雅退出...")
+            start_wait = time.time()
+            while time.time() - start_wait < 5:  # 最多等待5秒
                 still_alive = []
                 for pid in active_pids:
                     if pid in self.processes:
@@ -145,10 +144,11 @@ class ProcessManager:
                         except (ValueError, ProcessLookupError, AttributeError):
                                 pass
                 if not still_alive:
-                    logger.info("所有进程已优雅退出")
+                    self.logger.info("所有进程已优雅退出")
                     return
-                logger.info(f"仍有 {len(still_alive)} 个进程在运行，等待中... ({i+1}/5)")
-                time.sleep(1)
+                time.sleep(0.5)
+            
+            self.logger.info(f"仍有 {len(still_alive)} 个进程在运行，准备强制关闭...")
 
             # 第三阶段：强制杀死仍在运行的进程
             for pid in active_pids:
@@ -156,12 +156,12 @@ class ProcessManager:
                     process = self.processes[pid]['process']
                     try:
                         if process and hasattr(process, 'is_alive') and process.is_alive():
-                            logger.warning(f"进程 {pid} 未响应SIGTERM，强制终止")
+                            self.logger.warning(f"进程 {pid} 未响应SIGTERM，强制终止")
                             process.kill()
                     except (ValueError, ProcessLookupError, AttributeError) as e:
-                        logger.info(f"进程 {pid} 已终止: {e}")
+                        self.logger.info(f"进程 {pid} 已终止: {e}")
 
-            logger.info("所有进程关闭完成")
+            self.logger.info("所有进程关闭完成")
 
     def get_count(self):
         """获取管理的进程总数"""
@@ -179,7 +179,7 @@ process_manager = ProcessManager()
 
 def load_instance_configurations(logger):
     """
-    使用CookieManager解析环境变量和cookies目录，为每个cookie来源创建独立的浏览器实例配置。
+    使用CookieManager解析环境变量和Cookies目录，为每个Cookie来源创建独立的浏览器实例配置。
     """
     # 1. 读取所有实例共享的URL
     shared_url = clean_env_value(os.getenv("CAMOUFOX_INSTANCE_URL"))
@@ -197,16 +197,16 @@ def load_instance_configurations(logger):
     if proxy_value:
         global_settings["proxy"] = proxy_value
 
-    # 3. 使用CookieManager检测所有cookie来源
+    # 3. 使用CookieManager检测所有Cookie来源
     cookie_manager = CookieManager(logger)
     sources = cookie_manager.detect_all_sources()
 
-    # 检查是否有任何cookie来源
+    # 检查是否有任何Cookie来源
     if not sources:
-        logger.error("错误: 未找到任何cookie来源（既没有JSON文件，也没有环境变量cookie）。")
+        logger.error("错误: 未找到任何Cookie来源（既没有JSON文件，也没有环境变量Cookie）。")
         return None, None
 
-    # 4. 为每个cookie来源创建实例配置
+    # 4. 为每个Cookie来源创建实例配置
     instances = []
     for source in sources:
         if source.type == "file":
@@ -227,13 +227,15 @@ def load_instance_configurations(logger):
 
     return global_settings, instances
 
-def start_browser_instances():
+def start_browser_instances(run_mode="standalone"):
     """启动浏览器实例的核心逻辑"""
-    global app_running, process_manager
+    global app_running, process_manager, shutdown_event
 
     log_dir = logs_dir()
     logger = setup_logging(str(log_dir / 'app.log'))
     logger.info("---------------------Camoufox 实例管理器开始启动---------------------")
+    start_delay = int(os.getenv("INSTANCE_START_DELAY", "30"))
+    logger.info(f"运行模式: {run_mode}; 实例启动间隔: {start_delay} 秒")
 
     global_settings, instance_profiles = load_instance_configurations(logger)
     if not instance_profiles:
@@ -266,23 +268,34 @@ def start_browser_instances():
             logger.error(f"错误: 配置中缺少cookie_source对象")
             continue
 
-        process = multiprocessing.Process(target=run_browser_instance, args=(final_config,))
+        # 传递 shutdown_event 给子进程
+        process = multiprocessing.Process(target=run_browser_instance, args=(final_config, shutdown_event))
         process.start()
         # 等待一小段时间让进程获得PID，然后再添加到管理器
         time.sleep(0.1)
         process_manager.add_process(process, final_config)
 
-        # 如果不是最后一个实例，等待30秒再启动下一个实例，避免并发启动导致的高CPU占用
+        # 如果不是最后一个实例，等待配置的时间再启动下一个实例，避免并发启动导致的高CPU占用
         if i < len(instance_profiles):
-            logger.info(f"等待 30 秒后启动下一个实例...")
-            time.sleep(30)
+            time.sleep(start_delay)
 
     # 等待所有进程
+    previous_count = None
+    last_log_time = 0
     try:
         while app_running:
             alive_processes = process_manager.get_alive_processes()
+            current_count = len(alive_processes)
+
+            # 仅在数量变化或间隔一段时间后再记录，避免过于频繁的日志
+            now = time.time()
+            if current_count != previous_count or now - last_log_time >= 60:
+                logger.info(f"当前运行的浏览器实例数: {current_count}")
+                previous_count = current_count
+                last_log_time = now
+
             if not alive_processes:
-                logger.info("所有浏览器进程已结束")
+                logger.info("所有浏览器进程已结束，主进程即将退出")
                 break
 
             # 等待进程并清理死进程
@@ -298,12 +311,15 @@ def start_browser_instances():
         # 不在这里关闭进程，让信号处理器统一处理
         pass
 
+    # 确保在所有进程结束后退出
+    logger.info("浏览器实例管理器运行结束")
+
 def run_standalone_mode():
     """独立模式"""
     global app_running
     app_running = True
 
-    start_browser_instances()
+    start_browser_instances(run_mode="standalone")
 
 def run_server_mode():
     """服务器模式"""
@@ -323,7 +339,7 @@ def run_server_mode():
     app_running = True
 
     # 在后台线程中启动浏览器实例
-    browser_thread = threading.Thread(target=start_browser_instances, daemon=True)
+    browser_thread = threading.Thread(target=lambda: start_browser_instances(run_mode="server"), daemon=True)
     browser_thread.start()
 
     # 定义路由
@@ -367,7 +383,7 @@ def run_server_mode():
 
 def signal_handler(signum, frame):
     """统一的信号处理器 - 只有主进程应该执行这个逻辑"""
-    global app_running, process_manager
+    global app_running, process_manager, shutdown_event
 
     # 立即设置日志，确保能看到后续信息
     logger = setup_logging(str(logs_dir() / 'app.log'), prefix="signal")
@@ -377,53 +393,33 @@ def signal_handler(signum, frame):
     current_pid = os.getpid()
 
     # 使用一个简单的方法来判断：如果是子进程，通常没有全局变量 process_manager 的控制权
-    try:
-        # 检查当前进程是否在 process_manager 中管理的进程之一
-        if hasattr(process_manager, 'processes') and current_pid in process_manager.processes:
-            # 当前进程是被管理的子进程，不应该执行关闭逻辑
-            logger.info(f"子进程 {current_pid} 接收到信号 {signum}，忽略主进程信号处理逻辑")
-            return
-    except:
-        # 如果检查失败，假设是主进程继续执行
-        pass
+    # 或者通过判断 multiprocessing.current_process().name
+    if multiprocessing.current_process().name != 'MainProcess':
+         # 子进程接收到信号，通常应该由主进程来管理，或者子进程会因为主进程发送的SIGTERM而终止
+         # 这里我们选择忽略，让主进程通过terminate来管理，或者子进程通过shutdown_event来退出
+         logger.info(f"子进程 {current_pid} 接收到信号 {signum}，忽略主进程信号处理逻辑")
+         return
 
     logger.info(f"主进程 {current_pid} 接收到信号 {signum}，正在关闭应用...")
 
-    # 立即设置全局标志，阻止新的进程创建
+    # 1. 立即设置全局标志，阻止新的进程创建
     app_running = False
 
-    # 立即设置实例关闭事件
+    # 2. 设置跨进程关闭事件，通知所有子进程优雅退出
     try:
-        instance_shutdown_event.set()
-        logger.info("已设置实例关闭事件")
+        shutdown_event.set()
+        logger.info("已设置全局关闭事件 (shutdown_event)")
     except Exception as e:
-        logger.error(f"设置实例关闭事件时发生错误: {e}")
+        logger.error(f"设置关闭事件时发生错误: {e}")
 
-    # 极速关闭进程，最大限度减少在信号处理器中的时间
+    # 3. 调用进程管理器的优雅终止方法
     try:
-        logger.info("极速关闭模式启动...")
-
-        # 跳过详细的进程检查，直接发送信号
-        if hasattr(process_manager, 'processes') and process_manager.processes:
-            logger.info(f"发现 {len(process_manager.processes)} 个进程，发送关闭信号...")
-            # 直接遍历，不加锁以避免阻塞
-            for pid, info in list(process_manager.processes.items()):
-                process = info.get('process')
-                if process and hasattr(process, 'terminate'):
-                    try:
-                        process.terminate()
-                    except:
-                        pass  # 忽略错误，继续处理下一个
-            logger.info("关闭信号已发送")
-        else:
-            logger.info("没有需要关闭的进程")
-
+        process_manager.terminate_all(timeout=10)
     except Exception as e:
-        logger.error(f"极速关闭时发生错误: {e}")
+        logger.error(f"调用 terminate_all 时发生错误: {e}")
 
-    # 立即强制退出，不做任何等待
-    logger.info("应用立即强制退出...")
-    os._exit(0)
+    logger.info("应用关闭流程结束，主进程退出。")
+    sys.exit(0)
 
 def main():
     """主入口函数"""
