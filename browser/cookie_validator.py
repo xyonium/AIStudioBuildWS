@@ -1,15 +1,12 @@
 import time
 import sys
-import threading
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
 
 
 class CookieValidator:
-    """
-    Cookie验证器，负责定期验证Cookie的有效性
-    """
+    """Cookie验证器，负责定期验证Cookie的有效性。"""
 
-    def __init__(self, page, context, logger, instance_label):
+    def __init__(self, page, context, logger):
         """
         初始化Cookie验证器
 
@@ -17,13 +14,10 @@ class CookieValidator:
             page: 主页面实例
             context: 浏览器上下文
             logger: 日志记录器
-            instance_label: 实例标签
         """
         self.page = page
         self.context = context
         self.logger = logger
-        self.instance_label = instance_label
-        self.shutdown_event = threading.Event()
 
     
     def validate_cookies_in_main_thread(self):
@@ -81,12 +75,6 @@ class CookieValidator:
                     validation_page.close()
                 except Exception:
                     pass  # 忽略关闭错误
-
-    def stop_validation(self):
-        """
-        停止Cookie验证（现在在主线程中执行）
-        """
-        self.shutdown_event.set()
 
     def shutdown_instance_on_cookie_failure(self):
         """

@@ -76,7 +76,7 @@ def run_browser_instance(config, shutdown_event=None):
             page = context.new_page()
 
             # 创建Cookie验证器
-            cookie_validator = CookieValidator(page, context, logger, instance_label)
+            cookie_validator = CookieValidator(page, context, logger)
 
             # ####################################################################
             # ############ 增强的 page.goto() 错误处理和日志记录 ###############
@@ -224,21 +224,12 @@ def run_browser_instance(config, shutdown_event=None):
 
     except KeyboardInterrupt:
         logger.info(f"用户中断，正在关闭...")
-        # 停止Cookie验证器
-        if 'cookie_validator' in locals():
-            cookie_validator.stop_validation()
     except SystemExit as e:
         # 捕获Cookie验证失败时的系统退出
         if e.code == 1:
             logger.error("Cookie验证失败，关闭进程实例")
         else:
             logger.info(f"实例正常退出，退出码: {e.code}")
-        # 停止Cookie验证器
-        if 'cookie_validator' in locals():
-            cookie_validator.stop_validation()
     except Exception as e:
         # 这是一个最终的捕获，用于捕获所有未预料到的错误
         logger.exception(f"运行 Camoufox 实例时发生未预料的严重错误: {e}")
-        # 停止Cookie验证器
-        if 'cookie_validator' in locals():
-            cookie_validator.stop_validation()

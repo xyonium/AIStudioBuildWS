@@ -3,7 +3,6 @@ def convert_cookie_editor_to_playwright(cookies_from_editor, logger=None):
     将从 Cookie-Editor 插件导出的 Cookie 列表转换为 Playwright 兼容的格式。
     """
     playwright_cookies = []
-    allowed_keys = {'name', 'value', 'domain', 'path', 'expires', 'httpOnly', 'secure', 'sameSite'}
 
     for cookie in cookies_from_editor:
         pw_cookie = {}
@@ -48,8 +47,6 @@ def convert_kv_to_playwright(kv_string, default_domain=".google.com", logger=Non
     Returns:
         list: Playwright 兼容的 Cookie 列表
     """
-    import re
-
     playwright_cookies = []
 
     # 按分号分割 Cookie

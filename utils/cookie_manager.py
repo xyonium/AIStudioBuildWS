@@ -17,7 +17,6 @@ class CookieSource:
     type: str  # "file" | "env_var"
     identifier: str  # filename or "USER_COOKIE_1"
     display_name: str  # 显示名称
-    exists: bool = True
 
     def __str__(self):
         return f"{self.type}:{self.identifier}"

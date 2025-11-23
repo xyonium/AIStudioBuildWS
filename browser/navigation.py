@@ -46,9 +46,6 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
         # 检查是否收到关闭信号
         if shutdown_event and shutdown_event.is_set():
             logger.info("收到关闭信号，正在优雅退出保持活动循环...")
-            # 停止Cookie验证器
-            if cookie_validator:
-                cookie_validator.stop_validation()
             break
 
         try:
@@ -69,17 +66,11 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
             for _ in range(10):  # 10秒 = 10次1秒检查
                 if shutdown_event and shutdown_event.is_set():
                     logger.info("收到关闭信号，正在优雅退出保持活动循环...")
-                    # 停止Cookie验证器
-                    if cookie_validator:
-                        cookie_validator.stop_validation()
                     return
                 time.sleep(1)
 
         except Exception as e:
             logger.error(f"在保持活动循环中出错: {e}")
-            # 停止Cookie验证器
-            if cookie_validator:
-                cookie_validator.stop_validation()
             # 在保持活动循环中出错时截屏
             try:
                 screenshot_dir = logs_dir()
