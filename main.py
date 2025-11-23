@@ -275,9 +275,9 @@ def start_browser_instances(run_mode="standalone"):
         time.sleep(0.1)
         process_manager.add_process(process, final_config)
 
-        # 如果不是最后一个实例，等待配置的时间再启动下一个实例，避免并发启动导致的高CPU占用
-        if i < len(instance_profiles):
-            time.sleep(start_delay)
+        # 等待配置的时间，避免并发启动导致的高CPU占用
+        # 即使是最后一个实例，也等待一段时间让其初始化，然后再进入主循环
+        time.sleep(start_delay)
 
     # 等待所有进程
     previous_count = None
@@ -289,7 +289,7 @@ def start_browser_instances(run_mode="standalone"):
 
             # 仅在数量变化或间隔一段时间后再记录，避免过于频繁的日志
             now = time.time()
-            if current_count != previous_count or now - last_log_time >= 60:
+            if current_count != previous_count or now - last_log_time >= 600:
                 logger.info(f"当前运行的浏览器实例数: {current_count}")
                 previous_count = current_count
                 last_log_time = now
