@@ -8,7 +8,7 @@ from browser.cookie_validator import CookieValidator
 from camoufox.sync_api import Camoufox
 from utils.paths import logs_dir
 from utils.common import parse_headless_mode, ensure_dir
-from utils.url_helper import extract_url_path
+from utils.url_helper import extract_url_path, mask_url_for_logging, mask_path_for_logging
 
 
 def run_browser_instance(config, shutdown_event=None):
@@ -84,7 +84,7 @@ def run_browser_instance(config, shutdown_event=None):
             
             response = None
             try:
-                logger.info(f"正在导航到: {expected_url} (超时设置为 90 秒)")
+                logger.info(f"正在导航到: {mask_url_for_logging(expected_url)} (超时设置为 90 秒)")
                 # page.goto() 会返回一个 response 对象，我们可以用它来获取状态码等信息
                 response = page.goto(expected_url, wait_until='domcontentloaded', timeout=90000)
                 
@@ -97,12 +97,12 @@ def run_browser_instance(config, shutdown_event=None):
                         page.screenshot(path=os.path.join(screenshot_dir, f"WARN_http_status_{response.status}_{diagnostic_tag}.png"))
                 else:
                     # 对于非http/https的导航（如 about:blank），response可能为None
-                    logger.warning("page.goto 未返回响应对象，可能是一个非HTTP导航。")
+                    logger.warning("page.goto 未返回响应对象，可能是一个非HTTP导航")
 
             except TimeoutError:
                 # 这是最常见的错误：超时
-                logger.error(f"导航到 {expected_url} 超时 (超过120秒)。")
-                logger.error("可能原因：网络连接缓慢、目标网站服务器无响应、代理问题、或页面资源被阻塞。")
+                logger.error(f"导航到 {mask_url_for_logging(expected_url)} 超时 (超过90秒)")
+                logger.error("可能原因：网络连接缓慢、目标网站服务器无响应、代理问题、或页面资源被阻塞")
                 # 尝试保存诊断信息
                 try:
                     # 截图对于看到页面卡在什么状态非常有帮助（例如，空白页、加载中、Chrome错误页）
@@ -122,16 +122,16 @@ def run_browser_instance(config, shutdown_event=None):
             except PlaywrightError as e:
                 # 捕获其他Playwright相关的网络错误，例如DNS解析失败、连接被拒绝等
                 error_message = str(e)
-                logger.error(f"导航到 {expected_url} 时发生 Playwright 网络错误。")
+                logger.error(f"导航到 {mask_url_for_logging(expected_url)} 时发生 Playwright 网络错误")
                 logger.error(f"错误详情: {error_message}")
                 
                 # Playwright的错误信息通常很具体，例如 "net::ERR_CONNECTION_REFUSED"
                 if "net::ERR_NAME_NOT_RESOLVED" in error_message:
-                    logger.error("排查建议：检查DNS设置或域名是否正确。")
+                    logger.error("排查建议：检查DNS设置或域名是否正确")
                 elif "net::ERR_CONNECTION_REFUSED" in error_message:
-                    logger.error("排查建议：目标服务器可能已关闭，或代理/防火墙阻止了连接。")
+                    logger.error("排查建议：目标服务器可能已关闭，或代理/防火墙阻止了连接")
                 elif "net::ERR_INTERNET_DISCONNECTED" in error_message:
-                    logger.error("排查建议：检查本机的网络连接。")
+                    logger.error("排查建议：检查本机的网络连接")
                 
                 # 同样，尝试截图，尽管此时页面可能完全无法访问
                 try:
@@ -148,11 +148,11 @@ def run_browser_instance(config, shutdown_event=None):
             page.wait_for_timeout(2000)
             
             final_url = page.url
-            logger.info(f"导航完成。最终URL为: {final_url}")
+            logger.info(f"导航完成。最终URL为: {mask_url_for_logging(final_url)}")
 
             # ... 你原有的URL检查逻辑保持不变 ...
             if "accounts.google.com/v3/signin/identifier" in final_url:
-                logger.error("检测到Google登录页面（需要输入邮箱）。Cookie已完全失效。")
+                logger.error("检测到Google登录页面（需要输入邮箱）。Cookie已完全失效")
                 page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_identifier_page_{diagnostic_tag}.png"))
                 return
 
@@ -161,7 +161,7 @@ def run_browser_instance(config, shutdown_event=None):
             final_path = extract_url_path(final_url)
 
             if expected_path and expected_path in final_path:
-                logger.info(f"URL验证通过。预期路径: {expected_path}")
+                logger.info(f"URL验证通过。预期路径: {mask_path_for_logging(expected_path)}")
 
                 # --- 新的健壮策略：等待加载指示器消失 ---
                 # 这是解决竞态条件的关键。错误消息或内容只在初始加载完成后才会出现。
@@ -170,9 +170,9 @@ def run_browser_instance(config, shutdown_event=None):
                     logger.info("正在等待加载指示器 (spinner) 消失... (最长等待30秒)")
                     # 我们等待spinner变为'隐藏'状态或从DOM中消失。
                     spinner_locator.wait_for(state='hidden', timeout=30000)
-                    logger.info("加载指示器已消失。页面已完成异步加载。")
+                    logger.info("加载指示器已消失。页面已完成异步加载")
                 except TimeoutError:
-                    logger.error("页面加载指示器在30秒内未消失。页面可能已卡住。")
+                    logger.error("页面加载指示器在30秒内未消失。页面可能已卡住")
                     page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_spinner_stuck_{diagnostic_tag}.png"))
                     return # 如果页面加载卡住则退出
 
@@ -183,7 +183,7 @@ def run_browser_instance(config, shutdown_event=None):
 
                 # 这里我们只需要很短的超时时间，因为页面应该是稳定的。
                 if auth_error_locator.is_visible(timeout=2000):
-                    logger.error(f"检测到认证失败的错误横幅: '{auth_error_text}'. Cookie已过期或无效。")
+                    logger.error(f"检测到认证失败的错误横幅: '{auth_error_text}'. Cookie已过期或无效")
                     screenshot_path = os.path.join(screenshot_dir, f"FAIL_auth_error_banner_{diagnostic_tag}.png")
                     page.screenshot(path=screenshot_path)
                     
@@ -194,31 +194,28 @@ def run_browser_instance(config, shutdown_event=None):
                     return # 明确的失败，因此我们退出。
 
                 # --- 如果没有错误，进行最终确认（作为后备方案） ---
-                logger.info("未检测到认证错误横幅。进行最终确认。")
+                logger.info("未检测到认证错误横幅。进行最终确认")
                 login_button_cn = page.get_by_role('button', name='登录')
                 login_button_en = page.get_by_role('button', name='Login')
                 
                 if login_button_cn.is_visible(timeout=1000) or login_button_en.is_visible(timeout=1000):
-                    logger.error("页面上仍显示'登录'按钮。Cookie无效。")
+                    logger.error("页面上仍显示'登录'按钮。Cookie无效")
                     page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_login_button_visible_{diagnostic_tag}.png"))
                     return
 
                 # --- 如果所有检查都通过，我们假设成功 ---
-                logger.info("所有验证通过，确认已成功登录。")
-
-                # 创建Cookie验证器（验证将在主线程中执行，避免线程问题）
-                logger.info("Cookie验证器已创建，将定期验证Cookie有效性")
+                logger.info("所有验证通过，确认已成功登录")
 
                 handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator)
             elif "accounts.google.com/v3/signin/accountchooser" in final_url:
-                logger.warning("检测到Google账户选择页面。登录失败或Cookie已过期。")
+                logger.warning("检测到Google账户选择页面。登录失败或Cookie已过期")
                 page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_chooser_click_failed_{diagnostic_tag}.png"))
                 return
             else:
-                logger.error(f"导航到了意外的URL。")
-                logger.error(f"  预期路径: {expected_path}")
-                logger.error(f"  最终URL: {final_url}")
-                logger.error(f"  最终路径: {final_path}")
+                logger.error(f"导航到了意外的URL")
+                logger.error(f"  预期路径: {mask_path_for_logging(expected_path)}")
+                logger.error(f"  最终路径: {mask_path_for_logging(final_path)}")
+                logger.error(f"  最终URL: {mask_url_for_logging(final_url)}")
                 page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_unexpected_url_{diagnostic_tag}.png"))
                 return
 

@@ -185,7 +185,7 @@ def load_instance_configurations(logger):
     # 1. 读取所有实例共享的URL
     shared_url = clean_env_value(os.getenv("CAMOUFOX_INSTANCE_URL"))
     if not shared_url:
-        logger.error("错误: 缺少环境变量 CAMOUFOX_INSTANCE_URL。所有实例需要一个共享的目标URL。")
+        logger.error("错误: 缺少环境变量 CAMOUFOX_INSTANCE_URL。所有实例需要一个共享的目标URL")
         return None, None
 
     # 2. 读取全局设置
@@ -204,7 +204,7 @@ def load_instance_configurations(logger):
 
     # 检查是否有任何Cookie来源
     if not sources:
-        logger.error("错误: 未找到任何Cookie来源（既没有JSON文件，也没有环境变量Cookie）。")
+        logger.error("错误: 未找到任何Cookie来源（既没有JSON文件，也没有环境变量Cookie）")
         return None, None
 
     # 4. 为每个Cookie来源创建实例配置
@@ -240,7 +240,7 @@ def start_browser_instances(run_mode="standalone"):
 
     global_settings, instance_profiles = load_instance_configurations(logger)
     if not instance_profiles:
-        logger.error("错误: 环境变量中未找到任何实例配置。")
+        logger.error("错误: 环境变量中未找到任何实例配置")
         return
 
     for i, profile in enumerate(instance_profiles, 1):
@@ -419,7 +419,7 @@ def signal_handler(signum, frame):
     except Exception as e:
         logger.error(f"调用 terminate_all 时发生错误: {e}")
 
-    logger.info("应用关闭流程结束，主进程退出。")
+    logger.info("应用关闭流程结束，主进程退出")
     sys.exit(0)
 
 def main():
