@@ -42,6 +42,8 @@ Cookie 可以通过两种方式获取，两种方式选一种即可，推荐使�
 
 如果有多个账户，参考 `USER_COOKIE_1`，在 HuggingFace Space 的设置中依次增加 `USER_COOKIE_2`、`USER_COOKIE_3` 等环境变量即可。
 
+**可选配置：** 如果需要修改日志显示时区，可以添加 `TZ_OFFSET` 环境变量，例如设置为 `8` 表示 UTC+8（北京时间，默认值），设置为 `0` 表示 UTC。
+
 **重要提醒：** Cookie 属于敏感信息，请**务必使用 "Secrets"** (而不是 "Variables") 来存储，以防止 Cookie 外泄。
 
 ### 第三步（2）：服务器 Docker 部署
