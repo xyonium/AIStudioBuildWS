@@ -1,4 +1,13 @@
 import logging
+import datetime
+
+def beijing_converter(timestamp):
+    """
+    将时间戳转换为 UTC+8 (北京时间) 的 struct_time。
+    """
+    # UTC+8
+    beijing_time = datetime.datetime.fromtimestamp(timestamp, datetime.timezone(datetime.timedelta(hours=8)))
+    return beijing_time.timetuple()
 
 def setup_logging(log_file, prefix=None, level=logging.INFO):
     """
@@ -6,6 +15,8 @@ def setup_logging(log_file, prefix=None, level=logging.INFO):
     支持一个可选的前缀，用于标识日志来源。
 
     每次调用都会重新配置处理器，以适应多进程环境。
+    
+    时间显示默认为 UTC+8 (北京时间)。
 
     :param log_file: 日志文件的路径。
     :param prefix: (可选) 要添加到每条日志消息开头的字符串前缀。
@@ -31,6 +42,9 @@ def setup_logging(log_file, prefix=None, level=logging.INFO):
     ch.setLevel(level)
 
     formatter = logging.Formatter(log_format)
+    # 设置自定义的时间转换器 (UTC+8)
+    formatter.converter = beijing_converter
+
     fh.setFormatter(formatter)
     ch.setFormatter(formatter)
 
