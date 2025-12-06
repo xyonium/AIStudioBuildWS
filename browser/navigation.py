@@ -4,6 +4,9 @@ from playwright.sync_api import Page, expect
 from utils.paths import logs_dir
 from utils.common import ensure_dir
 
+class KeepAliveError(Exception):
+    pass
+
 def handle_untrusted_dialog(page: Page, logger=None):
     """
     检查并处理 "Last modified by..." 的弹窗。
@@ -83,4 +86,4 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
                 logger.info(f"已在保持活动循环出错时截屏: {screenshot_filename}")
             except Exception as screenshot_e:
                 logger.error(f"在保持活动循环出错时截屏失败: {screenshot_e}")
-            break # 如果页面关闭或出错，则退出循环
+            raise KeepAliveError(f"在保持活动循环时出错: {e}")
