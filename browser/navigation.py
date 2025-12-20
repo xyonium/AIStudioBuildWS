@@ -7,23 +7,45 @@ from utils.common import ensure_dir
 class KeepAliveError(Exception):
     pass
 
-def handle_untrusted_dialog(page: Page, logger=None):
+def handle_popup_dialog(page: Page, logger=None):
     """
-    检查并处理 "Last modified by..." 的弹窗。
-    如果弹窗出现，则点击 "OK" 按钮。
+    检查并处理弹窗。
+    交替点击 Got it 和 Continue to the app 按钮直到没有弹窗。
     """
-    ok_button_locator = page.get_by_role("button", name="OK")
-
+    logger.info("开始处理弹窗...")
+    
+    # 定义需要查找的按钮列表
+    button_names = ["Got it", "Continue to the app"]
+    max_iterations = 10  # 最多尝试10轮，防止死循环
+    total_clicks = 0
+    
     try:
-        if ok_button_locator.is_visible(timeout=10000): # 等待最多10秒
-            logger.info(f"检测到弹窗，正在点击 'OK' 按钮...")
+        for iteration in range(max_iterations):
+            clicked_in_round = False
             
-            ok_button_locator.click(force=True)
-            logger.info(f"'OK' 按钮已点击")
-            expect(ok_button_locator).to_be_hidden(timeout=1000)
-            logger.info(f"弹窗已确认关闭")
+            # 等待页面稳定
+            time.sleep(1)
+            
+            # 每轮交替尝试点击所有按钮
+            for button_name in button_names:
+                try:
+                    button_locator = page.locator(f'button:visible:has-text("{button_name}")')
+                    if button_locator.count() > 0 and button_locator.first.is_visible():
+                        # logger.info(f"检测到弹窗: 点击 '{button_name}'")
+                        button_locator.first.click(force=True, timeout=2000)
+                        total_clicks += 1
+                        clicked_in_round = True
+                        time.sleep(1)
+                except:
+                    pass
+            
+            if not clicked_in_round:
+                break
+        
+        if total_clicks > 0:
+            logger.info(f"弹窗处理完成, 共点击 {total_clicks} 次")
         else:
-            logger.info(f"在10秒内未检测到弹窗，继续执行...")
+            logger.info("未检测到弹窗")
     except Exception as e:
         logger.info(f"检查弹窗时发生意外：{e}，将继续执行...")
 
@@ -35,7 +57,7 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
     page.click('body') # 给予页面焦点
 
     # 检查并处理 "Last modified by..." 的弹窗
-    handle_untrusted_dialog(page, logger=logger)
+    handle_popup_dialog(page, logger=logger)
 
     if cookie_validator:
         logger.info("Cookie验证器已创建，将定期验证Cookie有效性")

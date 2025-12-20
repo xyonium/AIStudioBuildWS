@@ -5,6 +5,21 @@ import signal
 import sys
 import time
 
+# 加载 .env 文件（仅在非 Docker 环境且文件存在时）
+def load_env_file():
+    """加载 .env 文件，不影响已存在的环境变量"""
+    if os.environ.get("DOCKER_ENV") or os.path.exists("/.dockerenv"):
+        return  # Docker 环境，跳过加载
+    try:
+        from dotenv import load_dotenv
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=False)  # override=False 不覆盖已有环境变量
+    except ImportError:
+        pass  # python-dotenv 未安装，跳过
+
+load_env_file()
+
 from browser.instance import run_browser_instance
 from utils.logger import setup_logging
 from utils.paths import cookies_dir, logs_dir

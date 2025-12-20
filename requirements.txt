@@ -31,3 +31,4 @@ ua-parser==1.0.1
 ua-parser-builtins==0.18.0.post1
 urllib3==2.4.0
 yarl==1.20.1
+python-dotenv>=1.0.0
