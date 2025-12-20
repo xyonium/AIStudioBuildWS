@@ -3,7 +3,7 @@ import os
 from playwright.sync_api import Page, expect
 from utils.paths import logs_dir
 from utils.common import ensure_dir
-from browser.ws_helper import reconnect_ws, get_ws_status, dismiss_interaction_modal
+from browser.ws_helper import reconnect_ws, get_ws_status, dismiss_interaction_modal, click_in_iframe
 
 class KeepAliveError(Exception):
     pass
@@ -97,7 +97,8 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
             # 检测并关闭interaction-modal遮罩层（如果出现）
             dismiss_interaction_modal(page, logger)
 
-            page.click('body')
+            # 在iframe内随机移动并点击保活
+            click_in_iframe(page, logger)
             click_counter += 1
 
             # 检查WS状态是否发生变化

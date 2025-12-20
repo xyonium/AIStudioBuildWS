@@ -191,3 +191,51 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
         if logger:
             logger.debug(f"关闭 interaction-modal 时出错: {e}")
         return False
+
+
+def click_in_iframe(page: Page, logger=None) -> bool:
+    """
+    在 iframe 内随机移动鼠标并点击一次，用于保活。
+    避开顶部（状态栏和按钮区域）和右侧区域。
+    
+    返回: True 如果成功点击，False 如果失败
+    """
+    try:
+        iframe = page.locator('iframe[title="Preview"]')
+        if iframe.count() == 0:
+            return False
+        
+        iframe_box = iframe.first.bounding_box()
+        if not iframe_box:
+            return False
+        
+        # 安全区域：避开顶部80像素（状态栏+按钮）和右侧200像素（按钮区域）
+        safe_left = iframe_box['x'] + 50
+        safe_right = iframe_box['x'] + iframe_box['width'] - 200
+        safe_top = iframe_box['y'] + 80
+        safe_bottom = iframe_box['y'] + iframe_box['height'] - 50
+        
+        # 确保安全区域有效
+        if safe_right <= safe_left or safe_bottom <= safe_top:
+            return False
+        
+        # 随机起点（在安全区域内）
+        curr_x = random.randint(int(safe_left), int(safe_right))
+        curr_y = random.randint(int(safe_top), int(safe_bottom))
+        
+        # 随机移动几步（保持在安全区域内）
+        for _ in range(random.randint(3, 6)):
+            delta_x = random.randint(-30, 30)
+            delta_y = random.randint(-20, 20)
+            curr_x = max(int(safe_left), min(int(safe_right), curr_x + delta_x))
+            curr_y = max(int(safe_top), min(int(safe_bottom), curr_y + delta_y))
+            page.mouse.move(curr_x, curr_y)
+            time.sleep(0.05)
+        
+        # 点击当前位置
+        page.mouse.click(curr_x, curr_y)
+        return True
+    except Exception as e:
+        if logger:
+            logger.debug(f"在 iframe 内点击失败: {e}")
+        return False
