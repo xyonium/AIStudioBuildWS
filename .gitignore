@@ -16,6 +16,7 @@ __pycache__/
 # These directories are generated at runtime and may contain sensitive information.
 logs/
 cookies/
+docs/
 
 # IDE / Editor specific files
 .vscode/

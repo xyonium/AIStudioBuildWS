@@ -3,6 +3,7 @@ import os
 from playwright.sync_api import Page, expect
 from utils.paths import logs_dir
 from utils.common import ensure_dir
+from browser.ws_helper import reconnect_ws, get_ws_status, dismiss_interaction_modal
 
 class KeepAliveError(Exception):
     pass
@@ -79,6 +80,10 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
     # 等待页面加载和渲染
     time.sleep(15)
 
+    # 记录初始WS状态
+    last_ws_status = get_ws_status(page, logger)
+    logger.info(f"初始WS状态: {last_ws_status}")
+
     # 添加Cookie验证计数器
     click_counter = 0
 
@@ -89,8 +94,25 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
             break
 
         try:
+            # 检测并关闭interaction-modal遮罩层（如果出现）
+            dismiss_interaction_modal(page, logger)
+
             page.click('body')
             click_counter += 1
+
+            # 检查WS状态是否发生变化
+            current_ws_status = get_ws_status(page, logger)
+            if current_ws_status != last_ws_status:
+                logger.warning(f"WS状态变更: {last_ws_status} -> {current_ws_status}")
+                
+                # 如果不是CONNECTED状态，尝试重连
+                if current_ws_status != "CONNECTED":
+                    logger.info("WS断开，尝试重连...")
+                    reconnect_ws(page, logger)
+                    current_ws_status = get_ws_status(page, logger)
+                    logger.info(f"重连后WS状态: {current_ws_status}")
+                
+                last_ws_status = current_ws_status
 
             # 每360次点击（1小时）执行一次完整的Cookie验证
             if cookie_validator and click_counter >= 360:  # 360 * 10秒 = 3600秒 = 1小时
