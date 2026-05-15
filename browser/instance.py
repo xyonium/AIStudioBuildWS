@@ -229,7 +229,7 @@ def run_browser_instance(config, shutdown_event=None):
                 logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
                 # 提取路径部分进行匹配（允许域名重定向）
-                final_path = extract_url_path(final_url)
+                final_path = extract_url_path(page.url)
 
                 if expected_path and expected_path in final_path:
                     logger.info(f"URL验证通过。预期路径: {mask_path_for_logging(expected_path)}")
