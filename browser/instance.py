@@ -196,28 +196,39 @@ def run_browser_instance(config, shutdown_event=None):
                 final_url = page.url
                 logger.info(f"导航完成。最终URL为: {mask_url_for_logging(final_url)}")
                 
-                # 1. 合并判断是否进入了 Google 的登录/验证页面
-                if "accounts.google.com/v3/signin" in final_url:
-                    logger.warning(f"[{diagnostic_tag}] 拦截到Google登录/验证页面！进入人工干预模式！")
-                    logger.warning(f"[{diagnostic_tag}] >>> 请立即前往 VNC 桌面 (http://IP:6080) 手动完成验证！")
-                    logger.warning(f"[{diagnostic_tag}] >>> 脚本将在此挂起等待，最多等待 5 分钟...")
+                                
+                expected_path = extract_url_path(expected_url).split('?')[0]
+                
+                # 定义一个辅助函数来判断是否到达目标
+                def is_at_target_url():
+                    current_path = extract_url_path(page.url)
+                    return expected_path and expected_path in current_path
+
+                if not is_at_target_url():
+                    logger.warning(f"[{diagnostic_tag}] 尚未到达目标页面！当前在: {mask_url_for_logging(page.url)}")
+                    logger.warning(f"[{diagnostic_tag}] 可能是遇到了登录、Passkey提示、或安全检查...")
+                    logger.warning(f"[{diagnostic_tag}] >>> 请立即前往 VNC 桌面 (http://IP:6080) 手动完成操作！")
+                    logger.warning(f"[{diagnostic_tag}] >>> 脚本将在此挂起等待，直到浏览器到达目标页面，最多等待 5 分钟...")
                     
                     wait_time = 0
-                    # 循环检测，只要还在 signin 页面就一直等，直到你人工操作完成跳走到目标页
-                    while "accounts.google.com/v3/signin" in page.url and wait_time < 300:
-                        page.wait_for_timeout(5000)  # 每次睡 5 秒
+                    # 循环检测：只要还没到达预期路径，且没超时，就一直等！
+                    while not is_at_target_url() and wait_time < 300:
+                        page.wait_for_timeout(5000)  # 每次睡眠 5 秒
                         wait_time += 5
                         
-                    if "accounts.google.com/v3/signin" in page.url:
-                        logger.error(f"[{diagnostic_tag}] 5分钟内未完成手动登录，退出并放弃该实例。")
-                        page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_manual_login_timeout_{diagnostic_tag}.png"))
+                    if not is_at_target_url():
+                        logger.error(f"[{diagnostic_tag}] 5分钟内未到达目标页面，退出并放弃该实例。")
+                        logger.error(f"  预期路径: {mask_path_for_logging(expected_path)}")
+                        logger.error(f"  卡住路径: {mask_path_for_logging(extract_url_path(page.url))}")
+                        page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_manual_action_timeout_{diagnostic_tag}.png"))
                         return
                     else:
-                        logger.info(f"[{diagnostic_tag}] 人工验证似乎已完成！刷新当前页面 URL...")
-                        final_url = page.url # 更新URL，让它进入接下来的正确性校验
+                        logger.info(f"[{diagnostic_tag}] 人工操作完成，成功到达目标页面！")
+                
+                # 走到这里，说明要么一开始就在目标页面，要么经过你的人工操作最终到达了目标页面
+                logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
                 # 提取路径部分进行匹配（允许域名重定向）
-                expected_path = extract_url_path(expected_url).split('?')[0]
                 final_path = extract_url_path(final_url)
 
                 if expected_path and expected_path in final_path:
