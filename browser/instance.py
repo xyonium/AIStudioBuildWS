@@ -52,12 +52,12 @@ def run_browser_instance(config, shutdown_event=None):
 
     except Exception as e:
         logger.error(f"从Cookie来源加载时出错: {e}")
-        return
+        # 这里先不立刻 return，如果是Profile模式可能根本不需要加载成功
 
-    # 3. 检查是否有任何Cookie可用
+    # 【关键修改】：放宽限制，允许空 Cookie，因为我们要读本地 Profile
     if not all_cookies:
-        logger.error("错误: 没有可用的Cookie（既没有有效的JSON文件，也没有环境变量）")
-        return
+        logger.info(f"未检测到环境变量传入的 Cookie，将完全依赖本地 Profile ({diagnostic_tag}) 进行免密登录。")
+        # return 
 
     cookies = all_cookies
 
