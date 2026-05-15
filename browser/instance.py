@@ -226,15 +226,27 @@ def run_browser_instance(config, shutdown_event=None):
                     # --- 新的健壮策略：等待加载指示器消失 ---
                     # 这是解决竞态条件的关键。错误消息或内容只在初始加载完成后才会出现。
                     spinner_locator = page.locator('mat-spinner')
+                                        # 使用 .first 或 .nth(0) 解决有多个 spinner 的问题
+                    # 或者更好的是，检查它们全部隐藏
                     try:
-                        logger.info("正在等待加载指示器 (spinner) 消失... (最长等待30秒)")
-                        # 我们等待spinner变为'隐藏'状态或从DOM中消失。
-                        spinner_locator.wait_for(state='hidden', timeout=30000)
-                        logger.info("加载指示器已消失。页面已完成异步加载")
+                        logger.info("正在等待页面上的所有加载指示器 (spinner) 消失... (最长等待30秒)")
+                        
+                        # 获取所有的 spinner
+                        spinners = page.locator('mat-spinner')
+                        count = spinners.count()
+                        
+                        if count > 0:
+                            # 遍历并等待它们挨个消失
+                            for i in range(count):
+                                spinners.nth(i).wait_for(state='hidden', timeout=30000)
+                                
+                        logger.info("所有加载指示器已消失。页面已完成异步加载")
+                        
                     except TimeoutError:
-                        logger.error("页面加载指示器在30秒内未消失。页面可能已卡住")
+                        logger.error("页面加载指示器在30秒内未完全消失。页面可能已卡住")
                         page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_spinner_stuck_{diagnostic_tag}.png"))
-                        raise KeepAliveError("页面加载指示器超时")
+                        # 不再立刻抛出异常，而是记录错误并尝试继续执行，因为有时候小 spinner 只是背景组件
+                        logger.warning("忽略 spinner 超时，尝试继续执行检查...")
 
                     # --- 现在我们可以安全地检查错误消息 ---
                     # 我们使用最具体的文本以避免误判。
