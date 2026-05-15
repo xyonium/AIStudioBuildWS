@@ -1,6 +1,7 @@
 import os
 import signal
 import time
+import json
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
 from utils.logger import setup_logging
 from utils.cookie_manager import CookieManager
@@ -10,6 +11,7 @@ from camoufox.sync_api import Camoufox
 from utils.paths import logs_dir
 from utils.common import parse_headless_mode, ensure_dir
 from utils.url_helper import extract_url_path, mask_url_for_logging, mask_path_for_logging
+from camoufox.utils import launch_options as generate_launch_options
 
 
 def run_browser_instance(config, shutdown_event=None):
@@ -62,13 +64,42 @@ def run_browser_instance(config, shutdown_event=None):
     headless_mode = parse_headless_mode(headless_setting)
     launch_options = {"headless": headless_mode}
     # launch_options["block_images"] = True  # 禁用图片加载
-    
+
     if proxy:
         logger.info(f"使用代理: {proxy} 访问")
         launch_options["proxy"] = {"server": proxy, "bypass": "localhost, 127.0.0.1"}
     
     screenshot_dir = logs_dir()
     ensure_dir(screenshot_dir)
+
+    # ================= [新增代码：多用户 Profile 和指纹管理] =================
+    profiles_base_dir = "/app/camoufox_profiles"
+    ensure_dir(profiles_base_dir)
+    
+    # 使用 identifier (如 USER_COOKIE_1) 作为文件夹名，实现多用户完全隔离
+    profile_dir = os.path.join(profiles_base_dir, diagnostic_tag)
+    ensure_dir(profile_dir)
+    fingerprint_file = os.path.join(profile_dir, "fingerprint.json")
+    
+    if os.path.exists(fingerprint_file):
+        with open(fingerprint_file, "r") as f:
+            fingerprint_opts = json.load(f)
+            logger.info(f"已加载现有的环境指纹和 Profile: {profile_dir}")
+    else:
+        # 首次运行，生成指纹并固定
+        fingerprint_opts = generate_launch_options(
+            user_data_dir=profile_dir,
+            os="windows" # 伪装成 Windows 用户
+        )
+        with open(fingerprint_file, "w") as f:
+            json.dump(fingerprint_opts, f, indent=4)
+            logger.info(f"已生成并锁定全新环境指纹: {profile_dir}")
+
+    # 将指纹和持久化设置合并到 Camoufox 启动选项中
+    launch_options["from_options"] = fingerprint_opts
+    launch_options["persistent_context"] = True
+    launch_options["user_data_dir"] = profile_dir
+    # =========================================================================
 
     # 重启控制变量
     max_retries = int(os.getenv("MAX_RESTART_RETRIES", "5"))
@@ -82,18 +113,21 @@ def run_browser_instance(config, shutdown_event=None):
             return
 
         try:
-            with Camoufox(**launch_options) as browser:
-                context = browser.new_context()
-                context.add_cookies(cookies)
-                page = context.new_page()
+            # === [修改代码：由于开启了持久化，Camoufox 返回的是 BrowserContext] ===
+            with Camoufox(**launch_options) as context:
+                # 获取持久化上下文中已有的默认页面，如果没有则新建
+                page = context.pages[0] if context.pages else context.new_page()
+                
+                # 依然兼容你现有的环境变量/JSON导入逻辑（当作初始凭证注入）
+                if cookies:
+                    context.add_cookies(cookies)
 
-                # 创建Cookie验证器
+                # 创建Cookie验证器 (原有代码不需要改，context 对象完美兼容)
                 cookie_validator = CookieValidator(page, context, logger)
 
-                # ####################################################################
-                # ############ 增强的 page.goto() 错误处理和日志记录 ###############
-                # ####################################################################
+                # =============================================================
                 
+                # 下方的 page.goto() 等业务逻辑完全不需要改动！！！
                 response = None
                 try:
                     logger.info(f"正在导航到: {mask_url_for_logging(expected_url)} (超时设置为 90 秒)")
