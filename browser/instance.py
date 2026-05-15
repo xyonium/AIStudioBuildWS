@@ -192,14 +192,10 @@ def run_browser_instance(config, shutdown_event=None):
                 
                 logger.info("页面初步加载完成，正在检查并处理初始弹窗...")
                 page.wait_for_timeout(2000)
-                
-                final_url = page.url
-                logger.info(f"导航完成。最终URL为: {mask_url_for_logging(final_url)}")
-                
-                                
+
                 expected_path = extract_url_path(expected_url).split('?')[0]
                 
-                # 定义一个辅助函数来判断是否到达目标
+                # 1. 目标页面等待逻辑
                 def is_at_target_url():
                     current_path = extract_url_path(page.url)
                     return expected_path and expected_path in current_path
@@ -211,96 +207,53 @@ def run_browser_instance(config, shutdown_event=None):
                     logger.warning(f"[{diagnostic_tag}] >>> 脚本将在此挂起等待，直到浏览器到达目标页面，最多等待 5 分钟...")
                     
                     wait_time = 0
-                    # 循环检测：只要还没到达预期路径，且没超时，就一直等！
                     while not is_at_target_url() and wait_time < 300:
-                        page.wait_for_timeout(5000)  # 每次睡眠 5 秒
+                        page.wait_for_timeout(5000)
                         wait_time += 5
                         
                     if not is_at_target_url():
                         logger.error(f"[{diagnostic_tag}] 5分钟内未到达目标页面，退出并放弃该实例。")
-                        logger.error(f"  预期路径: {mask_path_for_logging(expected_path)}")
-                        logger.error(f"  卡住路径: {mask_path_for_logging(extract_url_path(page.url))}")
                         page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_manual_action_timeout_{diagnostic_tag}.png"))
                         return
                     else:
                         logger.info(f"[{diagnostic_tag}] 人工操作完成，成功到达目标页面！")
                 
-                # 走到这里，说明要么一开始就在目标页面，要么经过你的人工操作最终到达了目标页面
                 logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
-                # 提取路径部分进行匹配（允许域名重定向）
-                final_path = extract_url_path(page.url)
+                # 2. 等待所有的 Spinner (加载圈) 消失
+                try:
+                    logger.info("正在等待页面上的加载指示器消失... (最长等待30秒)")
+                    spinners = page.locator('mat-spinner')
+                    count = spinners.count()
+                    if count > 0:
+                        for i in range(count):
+                            spinners.nth(i).wait_for(state='hidden', timeout=30000)
+                    logger.info("加载指示器已消失。页面已完成异步加载")
+                except TimeoutError:
+                    logger.warning("忽略 spinner 超时，尝试继续执行...")
 
-                if expected_path and expected_path in final_path:
-                    logger.info(f"URL验证通过。预期路径: {mask_path_for_logging(expected_path)}")
+                # 3. 拦截并【自动点击】第三方 App 的“确认连接”弹窗
+                logger.info("检查是否有第三方 App 的连接确认弹窗...")
+                try:
+                    # 我们查找包含 "Connect"、"连接" 或 "确认" 文本的按钮
+                    confirm_btn = page.locator('button:has-text("Connect"), button:has-text("连接"), button:has-text("确认连接")')
+                    if confirm_btn.first.is_visible(timeout=3000):  # 等待最多3秒看弹窗是否出来
+                        logger.info("发现 '确认连接' 提示框，正在自动点击授权！")
+                        confirm_btn.first.click()
+                        page.wait_for_timeout(2000)  # 点完后等它消失
+                except Exception as e:
+                    pass  # 如果没有弹窗，就静默忽略，什么也不做
 
-                    # --- 新的健壮策略：等待加载指示器消失 ---
-                    # 这是解决竞态条件的关键。错误消息或内容只在初始加载完成后才会出现。
-                    spinner_locator = page.locator('mat-spinner')
-                                        # 使用 .first 或 .nth(0) 解决有多个 spinner 的问题
-                    # 或者更好的是，检查它们全部隐藏
-                    try:
-                        logger.info("正在等待页面上的所有加载指示器 (spinner) 消失... (最长等待30秒)")
-                        
-                        # 获取所有的 spinner
-                        spinners = page.locator('mat-spinner')
-                        count = spinners.count()
-                        
-                        if count > 0:
-                            # 遍历并等待它们挨个消失
-                            for i in range(count):
-                                spinners.nth(i).wait_for(state='hidden', timeout=30000)
-                                
-                        logger.info("所有加载指示器已消失。页面已完成异步加载")
-                        
-                    except TimeoutError:
-                        logger.error("页面加载指示器在30秒内未完全消失。页面可能已卡住")
-                        page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_spinner_stuck_{diagnostic_tag}.png"))
-                        # 不再立刻抛出异常，而是记录错误并尝试继续执行，因为有时候小 spinner 只是背景组件
-                        logger.warning("忽略 spinner 超时，尝试继续执行检查...")
-
-                    # --- 现在我们可以安全地检查错误消息 ---
-                    # 我们使用最具体的文本以避免误判。
-                    auth_error_text = "authentication error"
-                    auth_error_locator = page.get_by_text(auth_error_text, exact=False)
-
-                    # 这里我们只需要很短的超时时间，因为页面应该是稳定的。
-                    if auth_error_locator.is_visible(timeout=2000):
-                        logger.error(f"检测到认证失败的错误横幅: '{auth_error_text}'. Cookie已过期或无效")
-                        screenshot_path = os.path.join(screenshot_dir, f"FAIL_auth_error_banner_{diagnostic_tag}.png")
-                        page.screenshot(path=screenshot_path)
-                        
-                        # html_path = os.path.join(screenshot_dir, f"FAIL_auth_error_banner_{diagnostic_tag}.html")
-                        # with open(html_path, 'w', encoding='utf-8') as f:
-                        #     f.write(page.content())
-                        # logger.info(f"已保存包含错误信息的页面HTML: {html_path}")
-                        return # 明确的失败，因此我们退出。
-
-                    # --- 如果没有错误，进行最终确认（作为后备方案） ---
-                    logger.info("未检测到认证错误横幅。进行最终确认")
-                    login_button_cn = page.get_by_role('button', name='登录')
-                    login_button_en = page.get_by_role('button', name='Login')
-                    
-                    if login_button_cn.is_visible(timeout=1000) or login_button_en.is_visible(timeout=1000):
-                        logger.error("页面上仍显示'登录'按钮。Cookie无效")
-                        page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_login_button_visible_{diagnostic_tag}.png"))
-                        return
-
-                    # --- 如果所有检查都通过，我们假设成功 ---
-                    logger.info("所有验证通过，确认已成功登录")
-
-                    handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator)
-                elif "accounts.google.com/v3/signin/accountchooser" in final_url:
-                    logger.warning("检测到Google账户选择页面。登录失败或Cookie已过期")
-                    page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_chooser_click_failed_{diagnostic_tag}.png"))
+                # 4. 最终鉴权错误检查（防身用）
+                auth_error_locator = page.get_by_text("authentication error", exact=False)
+                if auth_error_locator.is_visible(timeout=2000):
+                    logger.error(f"检测到认证失败错误。Cookie已过期或无效")
+                    page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_auth_error_{diagnostic_tag}.png"))
                     return
-                else:
-                    logger.error(f"导航到了意外的URL")
-                    logger.error(f"  预期路径: {mask_path_for_logging(expected_path)}")
-                    logger.error(f"  最终路径: {mask_path_for_logging(final_path)}")
-                    logger.error(f"  最终URL: {mask_url_for_logging(final_url)}")
-                    page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_unexpected_url_{diagnostic_tag}.png"))
-                    return
+
+                # 5. 所有验证通过，确认成功！
+                logger.info("所有验证通过，确认已成功登录并准备就绪")
+                handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator)
 
                 # 如果运行到这里且没有异常，表示实例正常结束（例如收到关闭信号）
                 # 正常结束时重置重试计数器
