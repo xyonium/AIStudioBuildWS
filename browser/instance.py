@@ -195,12 +195,26 @@ def run_browser_instance(config, shutdown_event=None):
                 
                 final_url = page.url
                 logger.info(f"导航完成。最终URL为: {mask_url_for_logging(final_url)}")
-
-                # ... 你原有的URL检查逻辑保持不变 ...
-                if "accounts.google.com/v3/signin/identifier" in final_url:
-                    logger.error("检测到Google登录页面（需要输入邮箱）。Cookie已完全失效")
-                    page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_identifier_page_{diagnostic_tag}.png"))
-                    return
+                
+                # 1. 合并判断是否进入了 Google 的登录/验证页面
+                if "accounts.google.com/v3/signin" in final_url:
+                    logger.warning(f"[{diagnostic_tag}] 拦截到Google登录/验证页面！进入人工干预模式！")
+                    logger.warning(f"[{diagnostic_tag}] >>> 请立即前往 VNC 桌面 (http://IP:6080) 手动完成验证！")
+                    logger.warning(f"[{diagnostic_tag}] >>> 脚本将在此挂起等待，最多等待 5 分钟...")
+                    
+                    wait_time = 0
+                    # 循环检测，只要还在 signin 页面就一直等，直到你人工操作完成跳走到目标页
+                    while "accounts.google.com/v3/signin" in page.url and wait_time < 300:
+                        page.wait_for_timeout(5000)  # 每次睡 5 秒
+                        wait_time += 5
+                        
+                    if "accounts.google.com/v3/signin" in page.url:
+                        logger.error(f"[{diagnostic_tag}] 5分钟内未完成手动登录，退出并放弃该实例。")
+                        page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_manual_login_timeout_{diagnostic_tag}.png"))
+                        return
+                    else:
+                        logger.info(f"[{diagnostic_tag}] 人工验证似乎已完成！刷新当前页面 URL...")
+                        final_url = page.url # 更新URL，让它进入接下来的正确性校验
 
                 # 提取路径部分进行匹配（允许域名重定向）
                 expected_path = extract_url_path(expected_url).split('?')[0]
