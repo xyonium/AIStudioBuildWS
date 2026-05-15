@@ -25,15 +25,23 @@ RUN camoufox fetch
 COPY . .
 
 # 修改启动脚本：启动 Xvfb -> VNC -> NoVNC网页服务 -> Python脚本
+# 修改启动脚本：增加 rm 锁文件 和 Xvfb 的 -ac 参数
 RUN echo '#!/bin/bash\n\
 export DISPLAY=:99\n\
-# 1. 启动虚拟显示器\n\
-Xvfb :99 -screen 0 1280x800x24 &\n\
+\n\
+# 清理可能残留的 X11 锁文件，防止容器重启后报错\n\
+rm -f /tmp/.X99-lock\n\
+\n\
+# 1. 启动虚拟显示器 (加上 -ac 禁用访问控制，非常重要！)\n\
+Xvfb :99 -ac -screen 0 1280x800x24 -nolisten tcp &\n\
 sleep 2\n\
+\n\
 # 2. 启动窗口管理器\n\
 fluxbox &\n\
+\n\
 # 3. 启动 VNC 服务\n\
 x11vnc -display :99 -nopw -listen localhost -xkb -forever &\n\
+\n\
 # 4. 启动 NoVNC (将 VNC 转为网页 WebSocket)\n\
 websockify --web /usr/share/novnc/ 6080 localhost:5900 &\n\
 \n\
