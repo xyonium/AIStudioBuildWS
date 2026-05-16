@@ -81,27 +81,25 @@ def run_browser_instance(config, shutdown_event=None):
     profile_dir = os.path.join(profiles_base_dir, diagnostic_tag)
     ensure_dir(profile_dir)
     fingerprint_file = os.path.join(profile_dir, "fingerprint.json")
-        # 我们设定一个折中且稳定的分辨率，节省内存且界面完整
-    TARGET_WIDTH = 1440
-    TARGET_HEIGHT = 900
-
     if os.path.exists(fingerprint_file):
         with open(fingerprint_file, "r") as f:
             fingerprint_opts = json.load(f)
             logger.info(f"已加载现有的环境指纹和 Profile: {profile_dir}")
     else:
-        # 首次运行，生成指纹并固定
+        # ====== 新增/修改代码开始 ======
+        # 不要传 screen 参数了，让它自己随机，防止被风控
         fingerprint_opts = generate_launch_options(
             user_data_dir=profile_dir,
-            os="windows", 
-            # 关键修改：使用 Screen 对象包裹参数
-            screen=Screen(
-                min_width=TARGET_WIDTH, 
-                max_width=TARGET_WIDTH, 
-                min_height=TARGET_HEIGHT, 
-                max_height=TARGET_HEIGHT
-            )
+            os="windows",
         )
+        
+        # 强制 Firefox 启动时最大化或指定宽高
+        # -width 1440 -height 900 是 Firefox 底层的 CLI 参数
+        if "args" not in fingerprint_opts:
+            fingerprint_opts["args"] = []
+        fingerprint_opts["args"].extend(["-width", "1440", "-height", "900"])
+        # ====== 新增/修改代码结束 ======
+        
         with open(fingerprint_file, "w") as f:
             json.dump(fingerprint_opts, f, indent=4)
             logger.info(f"已生成并锁定全新环境指纹: {profile_dir}")
