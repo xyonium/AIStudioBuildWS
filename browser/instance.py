@@ -12,6 +12,7 @@ from utils.paths import logs_dir
 from utils.common import parse_headless_mode, ensure_dir
 from utils.url_helper import extract_url_path, mask_url_for_logging, mask_path_for_logging
 from camoufox.utils import launch_options as generate_launch_options
+from browserforge.fingerprints import Screen
 
 
 def run_browser_instance(config, shutdown_event=None):
@@ -93,9 +94,13 @@ def run_browser_instance(config, shutdown_event=None):
         fingerprint_opts = generate_launch_options(
             user_data_dir=profile_dir,
             os="windows", 
-            # 关键修改：告诉反指纹引擎，生成指定屏幕尺寸的设备指纹
-            screen={"min_width": TARGET_WIDTH, "max_width": TARGET_WIDTH, 
-                    "min_height": TARGET_HEIGHT, "max_height": TARGET_HEIGHT}
+            # 关键修改：使用 Screen 对象包裹参数
+            screen=Screen(
+                min_width=TARGET_WIDTH, 
+                max_width=TARGET_WIDTH, 
+                min_height=TARGET_HEIGHT, 
+                max_height=TARGET_HEIGHT
+            )
         )
         with open(fingerprint_file, "w") as f:
             json.dump(fingerprint_opts, f, indent=4)
