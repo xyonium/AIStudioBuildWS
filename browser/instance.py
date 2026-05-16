@@ -80,7 +80,10 @@ def run_browser_instance(config, shutdown_event=None):
     profile_dir = os.path.join(profiles_base_dir, diagnostic_tag)
     ensure_dir(profile_dir)
     fingerprint_file = os.path.join(profile_dir, "fingerprint.json")
-    
+        # 我们设定一个折中且稳定的分辨率，节省内存且界面完整
+    TARGET_WIDTH = 1440
+    TARGET_HEIGHT = 900
+
     if os.path.exists(fingerprint_file):
         with open(fingerprint_file, "r") as f:
             fingerprint_opts = json.load(f)
@@ -89,13 +92,15 @@ def run_browser_instance(config, shutdown_event=None):
         # 首次运行，生成指纹并固定
         fingerprint_opts = generate_launch_options(
             user_data_dir=profile_dir,
-            os="windows" # 伪装成 Windows 用户
+            os="windows", 
+            # 关键修改：告诉反指纹引擎，生成指定屏幕尺寸的设备指纹
+            screen={"min_width": TARGET_WIDTH, "max_width": TARGET_WIDTH, 
+                    "min_height": TARGET_HEIGHT, "max_height": TARGET_HEIGHT}
         )
         with open(fingerprint_file, "w") as f:
             json.dump(fingerprint_opts, f, indent=4)
             logger.info(f"已生成并锁定全新环境指纹: {profile_dir}")
-    # ====== 新增：强制 1920x1080 视口 ======
-    fingerprint_opts["viewport"] = {"width": 1920, "height": 1080}
+    
     # 将指纹和持久化设置合并到 Camoufox 启动选项中
     launch_options["from_options"] = fingerprint_opts
     launch_options["persistent_context"] = True
