@@ -94,7 +94,8 @@ def run_browser_instance(config, shutdown_event=None):
         with open(fingerprint_file, "w") as f:
             json.dump(fingerprint_opts, f, indent=4)
             logger.info(f"已生成并锁定全新环境指纹: {profile_dir}")
-
+    # ====== 新增：强制 1920x1080 视口 ======
+    fingerprint_opts["viewport"] = {"width": 1920, "height": 1080}
     # 将指纹和持久化设置合并到 Camoufox 启动选项中
     launch_options["from_options"] = fingerprint_opts
     launch_options["persistent_context"] = True
