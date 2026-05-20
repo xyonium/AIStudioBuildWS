@@ -168,7 +168,7 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                 # 随机起点
                 curr_x = iframe_box['x'] + random.randint(50, int(iframe_box['width']) - 50)
                 curr_y = iframe_box['y'] + random.randint(50, int(iframe_box['height']) - 50)
-                
+
                 # 持续连续移动直到遮罩关闭，最多尝试30次
                 for i in range(30):
                     # 从当前位置随机移动一段距离
@@ -176,10 +176,11 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                     delta_y = random.randint(-20, 20)
                     curr_x = max(iframe_box['x'] + 20, min(iframe_box['x'] + iframe_box['width'] - 20, curr_x + delta_x))
                     curr_y = max(iframe_box['y'] + 20, min(iframe_box['y'] + iframe_box['height'] - 20, curr_y + delta_y))
-                    
+
+                    # 恢复 Playwright 的鼠标操作
                     page.mouse.move(curr_x, curr_y)
                     time.sleep(0.05)
-                    
+
                     # 每次移动后检查遮罩是否关闭
                     if modal.count() == 0 or not modal.first.is_visible(timeout=100):
                         if logger:
@@ -197,45 +198,61 @@ def click_in_iframe(page: Page, logger=None) -> bool:
     """
     在 iframe 内随机移动鼠标并点击一次，用于保活。
     避开顶部（状态栏和按钮区域）和右侧区域。
-    
+
     返回: True 如果成功点击，False 如果失败
     """
     try:
+        if logger:
+            logger.debug("开始执行 click_in_iframe 保活检测...")
+
         iframe = page.locator('iframe[title="Preview"]')
         if iframe.count() == 0:
+            if logger:
+                logger.debug("click_in_iframe: 失败，未找到 title='Preview' 的 iframe")
             return False
-        
+
         iframe_box = iframe.first.bounding_box()
         if not iframe_box:
+            if logger:
+                logger.warning("click_in_iframe: 失败，iframe 存在但 bounding_box 返回 None (可能被隐藏或渲染引擎休眠)")
             return False
-        
+
+        if logger:
+            logger.debug(f"click_in_iframe: 获取到 iframe 位置 {iframe_box}")
+
         # 安全区域：避开顶部80像素（状态栏+按钮）和右侧200像素（按钮区域）
         safe_left = iframe_box['x'] + 50
         safe_right = iframe_box['x'] + iframe_box['width'] - 200
         safe_top = iframe_box['y'] + 80
         safe_bottom = iframe_box['y'] + iframe_box['height'] - 50
-        
+
         # 确保安全区域有效
         if safe_right <= safe_left or safe_bottom <= safe_top:
+            if logger:
+                logger.warning(f"click_in_iframe: 安全区域计算无效 (left:{safe_left}, right:{safe_right}, top:{safe_top}, bottom:{safe_bottom})")
             return False
-        
+
         # 随机起点（在安全区域内）
         curr_x = random.randint(int(safe_left), int(safe_right))
         curr_y = random.randint(int(safe_top), int(safe_bottom))
-        
+
         # 随机移动几步（保持在安全区域内）
         for _ in range(random.randint(3, 6)):
             delta_x = random.randint(-30, 30)
             delta_y = random.randint(-20, 20)
             curr_x = max(int(safe_left), min(int(safe_right), curr_x + delta_x))
             curr_y = max(int(safe_top), min(int(safe_bottom), curr_y + delta_y))
+
+            # 使用 Playwright 的鼠标操作，即使在后台也能正常生效
             page.mouse.move(curr_x, curr_y)
             time.sleep(0.05)
-        
+
         # 点击当前位置
         page.mouse.click(curr_x, curr_y)
+        if logger:
+            logger.debug("click_in_iframe: 成功完成鼠标移动和点击")
         return True
     except Exception as e:
         if logger:
-            logger.debug(f"在 iframe 内点击失败: {e}")
+            logger.error(f"在 iframe 内点击失败: {e}")
         return False

@@ -108,6 +108,17 @@ def run_browser_instance(config, shutdown_event=None):
     launch_options["from_options"] = fingerprint_opts
     launch_options["persistent_context"] = True
     launch_options["user_data_dir"] = profile_dir
+    # [新增] 强制 Firefox 禁用后台资源冻结、标签页休眠和遮挡跟踪 (Occlusion Tracking)
+    # 这对多窗口/多标签页在无头环境下能否持续运行至关重要
+    launch_options["firefox_user_prefs"] = {
+        "browser.tabs.unloadOnLowMemory": False, # 禁用低内存卸载
+        "dom.min_background_timeout_value": 4,   # 维持后台计时器频率
+        "network.websocket.timeout": 0,          # 禁用WS超时
+        "page_visibility.dont_suspend_inactive": True, # 防止非活动页面挂起
+        "dom.timeout.enable_budget_timer_fallback": False,
+        "widget.windows.window_occlusion_tracking.enabled": False, # 禁用遮挡跟踪（如果窗口被遮挡，原本会挂起渲染）
+        "gfx.webrender.dcomp-win.enabled": False # 关闭可能导致黑屏或不渲染的硬件加速遮挡
+    }
     # =========================================================================
 
     # 重启控制变量
