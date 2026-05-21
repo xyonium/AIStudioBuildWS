@@ -10,43 +10,58 @@ class KeepAliveError(Exception):
 
 def handle_popup_dialog(page: Page, logger=None):
     """
-    检查并处理弹窗。
-    交替点击 Got it 和 Continue to the app 按钮直到没有弹窗。
+    检查并处理所有弹窗/模态框。
+    支持Google AI Studio常见弹窗（Terms、Tutorial、Got it、Continue等）。
+    只有在首次检测到弹窗时等待额外时间，确保异步加载的模态框完全渲染。
     """
-    logger.info("开始处理弹窗...")
-    
-    # 定义需要查找的按钮列表
-    button_names = ["Got it", "Continue to the app"]
-    max_iterations = 10  # 最多尝试10轮，防止死循环
+    # 定义需要查找的按钮列表（按优先级排序）
+    button_names = [
+        "Continue",            # Terms/法律条款弹窗
+        "Continue to the app", # 欢迎/介绍弹窗
+        "Got it",              # 提示弹窗
+        "Got it, thanks",      # 感谢提示
+        "OK",                  # 通用确认
+        "Accept",              # 接受
+        "I agree",             # 同意
+    ]
+    max_iterations = 10
     total_clicks = 0
-    
+    any_found = False
+
     try:
         for iteration in range(max_iterations):
             clicked_in_round = False
-            
-            # 等待页面稳定
-            time.sleep(1)
-            
-            # 每轮交替尝试点击所有按钮
+
+            if iteration == 0:
+                # 第一轮先等待，让异步弹窗完全加载
+                time.sleep(3)
+            else:
+                time.sleep(1)
+
             for button_name in button_names:
                 try:
-                    button_locator = page.locator(f'button:visible:has-text("{button_name}")')
+                    button_locator = page.locator(
+                        f'button:visible:has-text("{button_name}"):not([disabled])'
+                    )
                     if button_locator.count() > 0 and button_locator.first.is_visible():
-                        # logger.info(f"检测到弹窗: 点击 '{button_name}'")
+                        if logger:
+                            logger.info(f"检测到弹窗按钮: '{button_name}'，正在点击...")
                         button_locator.first.click(force=True, timeout=2000)
                         total_clicks += 1
                         clicked_in_round = True
+                        any_found = True
                         time.sleep(1)
-                except:
+                except Exception:
                     pass
-            
+
             if not clicked_in_round:
                 break
-        
+
         if total_clicks > 0:
             logger.info(f"弹窗处理完成, 共点击 {total_clicks} 次")
         else:
             logger.info("未检测到弹窗")
+
     except Exception as e:
         logger.info(f"检查弹窗时发生意外：{e}，将继续执行...")
 
