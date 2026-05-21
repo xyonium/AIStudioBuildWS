@@ -20,6 +20,7 @@ def handle_popup_dialog(page: Page, logger=None):
         "Continue to the app", # 欢迎/介绍弹窗
         "Got it",              # 提示弹窗
         "Got it, thanks",      # 感谢提示
+        "Dismiss",             # 通知横幅关闭按钮
         "OK",                  # 通用确认
         "Accept",              # 接受
         "I agree",             # 同意
@@ -94,6 +95,9 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
 
     # 等待页面加载和渲染
     time.sleep(15)
+
+    # 【兜底检查】：再次处理可能延迟出现的弹窗 (如 Terms/Continue 异步加载)
+    handle_popup_dialog(page, logger=logger)
 
     # 记录初始WS状态
     last_ws_status = get_ws_status(page, logger)
