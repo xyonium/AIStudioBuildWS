@@ -175,7 +175,7 @@ def run_browser_instance(config, shutdown_event=None):
                         screenshot_path = os.path.join(screenshot_dir, f"FAIL_timeout_{diagnostic_tag}.png")
                         page.screenshot(path=screenshot_path, full_page=True)
                         logger.info(f"已截取超时时的屏幕快照: {screenshot_path}")
-                        
+
                         # 保存HTML可以帮助分析DOM结构，即使在无头模式下也很有用
                         html_path = os.path.join(screenshot_dir, f"FAIL_timeout_{diagnostic_tag}.html")
                         with open(html_path, 'w', encoding='utf-8') as f:
@@ -183,14 +183,16 @@ def run_browser_instance(config, shutdown_event=None):
                         logger.info(f"已保存超时时的页面HTML: {html_path}")
                     except Exception as diag_e:
                         logger.error(f"在尝试进行超时诊断（截图/保存HTML）时发生额外错误: {diag_e}")
-                    return # 超时后，后续操作无意义，直接终止
+
+                    # 不要直接 return 终止进程，抛出 KeepAliveError 交给外部循环重试 (即刷新页面)
+                    raise KeepAliveError(f"页面加载超时: {expected_url}")
 
                 except PlaywrightError as e:
                     # 捕获其他Playwright相关的网络错误，例如DNS解析失败、连接被拒绝等
                     error_message = str(e)
                     logger.error(f"导航到 {mask_url_for_logging(expected_url)} 时发生 Playwright 网络错误")
                     logger.error(f"错误详情: {error_message}")
-                    
+
                     # Playwright的错误信息通常很具体，例如 "net::ERR_CONNECTION_REFUSED"
                     if "net::ERR_NAME_NOT_RESOLVED" in error_message:
                         logger.error("排查建议：检查DNS设置或域名是否正确")
@@ -198,15 +200,17 @@ def run_browser_instance(config, shutdown_event=None):
                         logger.error("排查建议：目标服务器可能已关闭，或代理/防火墙阻止了连接")
                     elif "net::ERR_INTERNET_DISCONNECTED" in error_message:
                         logger.error("排查建议：检查本机的网络连接")
-                    
-                    # 同样，尝试截图，尽管此时页面可能完全无法访问
+
+                    # 同样尝试截图，尽管此时页面可能完全无法访问
                     try:
                         screenshot_path = os.path.join(screenshot_dir, f"FAIL_network_error_{diagnostic_tag}.png")
                         page.screenshot(path=screenshot_path)
                         logger.info(f"已截取网络错误时的屏幕快照: {screenshot_path}")
                     except Exception as diag_e:
                         logger.error(f"在尝试进行网络错误诊断（截图）时发生额外错误: {diag_e}")
-                    return # 网络错误，终止
+
+                    # 网络错误也应该重试刷新，而不是直接终止
+                    raise KeepAliveError(f"网络错误: {error_message}")
 
                 # --- 如果导航没有抛出异常，继续执行后续逻辑 ---
                 

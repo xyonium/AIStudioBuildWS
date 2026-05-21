@@ -74,22 +74,45 @@ def click_disconnect(page: Page, logger=None) -> bool:
 def click_connect(page: Page, logger=None) -> bool:
     """
     点击Connect按钮建立WS连接（在iframe内部）。
+    如果按钮处于 disabled 状态（CONNECTING 过渡态），会等待最多15秒直到变为可用。
     """
     try:
         frame = get_preview_frame(page, logger)
         if not frame:
             return False
-        
+
         connect_btn = frame.locator('button:has-text("Connect")')
-        if connect_btn.count() > 0 and connect_btn.first.is_visible(timeout=3000):
-            connect_btn.first.click(timeout=5000)
+        if connect_btn.count() == 0:
             if logger:
-                logger.info("已点击 Connect 按钮")
-            time.sleep(1)
-            return True
+                logger.warning("未找到 Connect 按钮")
+            return False
+
+        if not connect_btn.first.is_visible(timeout=3000):
+            if logger:
+                logger.warning("Connect 按钮不可见")
+            return False
+
+        # 等待按钮变为 enabled 状态 (处理 CONNECTING 过渡态)
+        try:
+            connect_btn.first.wait_for(state='attached', timeout=15000)
+            # 等待 disabled 属性消失
+            start = time.time()
+            while time.time() - start < 15:
+                is_disabled = connect_btn.first.is_disabled()
+                if not is_disabled:
+                    break
+                if logger:
+                    logger.debug("Connect 按钮当前为 disabled，等待可用...")
+                time.sleep(1)
+        except Exception:
+            if logger:
+                logger.warning("等待 Connect 按钮变为可用超时，尝试强制点击")
+
+        connect_btn.first.click(timeout=5000)
         if logger:
-            logger.warning("未找到可见的 Connect 按钮")
-        return False
+            logger.info("已点击 Connect 按钮")
+        time.sleep(1)
+        return True
     except Exception as e:
         if logger:
             logger.warning(f"点击 Connect 按钮失败: {e}")
@@ -111,33 +134,69 @@ def wait_for_ws_connected(page: Page, logger=None, timeout: int = 30) -> bool:
 
 def reconnect_ws(page: Page, logger=None) -> str:
     """
-    执行断开再连接的流程，并返回最终WS状态。
-    流程：关闭遮罩 -> Disconnect -> 等待IDLE -> Connect -> 等待CONNECTED -> 获取状态
+    智能执行WS重连流程，并返回最终WS状态。
+    处理UNKNOWN/CONNECTING等过渡态：
+    - UNKNOWN/CONNECTING → 短暂等待，若恢复就不操作
+    - IDLE → 直接 Connect
+    - CONNECTED 但Disconnect按钮不存在 → 说明可能是误报，跳过
+    - 其他 → 先 Disconnect 再 Connect
     """
     if logger:
-        logger.info("开始执行WS重连流程: Disconnect -> Connect")
-    
+        logger.info("开始执行WS重连流程...")
+
     # 先关闭 interaction-modal 遮罩层（如果存在）
     dismiss_interaction_modal(page, logger)
-    
-    # 先断开连接
-    click_disconnect(page, logger)
-    time.sleep(2)
-    
-    # 检查是否变为IDLE
-    status = get_ws_status(page, logger)
+
+    # 获取当前状态
+    current_status = get_ws_status(page, logger)
     if logger:
-        logger.info(f"断开后WS状态: {status}")
-    
-    # 再连接
-    click_connect(page, logger)
-    time.sleep(2)
-    
+        logger.info(f"重连前WS状态: {current_status}")
+
+    # UNKNOWN/CONNECTING 是过渡态，短暂等待看是否自行恢复
+    if current_status in ("UNKNOWN", "CONNECTING"):
+        if logger:
+            logger.info(f"检测到过渡态 {current_status}，等待3秒观察是否自行恢复...")
+        time.sleep(3)
+        current_status = get_ws_status(page, logger)
+        if logger:
+            logger.info(f"等待后WS状态: {current_status}")
+        # 如果恢复了，直接返回
+        if current_status == "CONNECTED":
+            if logger:
+                logger.info("WS状态已自行恢复为CONNECTED，跳过重连")
+            return current_status
+
+    # IDLE状态：已断开，直接Connect
+    if current_status == "IDLE":
+        if logger:
+            logger.info("当前已是IDLE状态，跳过Disconnect，直接Connect...")
+        click_connect(page, logger)
+        time.sleep(2)
+    else:
+        # 尝试先断开再连接
+        disconnected = click_disconnect(page, logger)
+        if not disconnected:
+            # Disconnect按钮不存在，可能是误报或已经处于半断开状态
+            if current_status == "CONNECTED":
+                if logger:
+                    logger.info("Disconnect按钮不存在但状态为CONNECTED，视为误报，跳过重连")
+                return current_status
+            if logger:
+                logger.info("Disconnect按钮不存在，直接尝试Connect...")
+        else:
+            time.sleep(2)
+
+        status = get_ws_status(page, logger)
+        if logger:
+            logger.info(f"断开后WS状态: {status}")
+        click_connect(page, logger)
+        time.sleep(2)
+
     # 等待连接成功
     if wait_for_ws_connected(page, logger, timeout=15):
         status = get_ws_status(page, logger)
         if logger:
-            logger.info(f"重连后WS状态: {status}")
+            logger.info(f"WS重连成功，当前状态: {status}")
         return status
     else:
         status = get_ws_status(page, logger)
@@ -220,10 +279,10 @@ def click_in_iframe(page: Page, logger=None) -> bool:
         if logger:
             logger.debug(f"click_in_iframe: 获取到 iframe 位置 {iframe_box}")
 
-        # 安全区域：避开顶部80像素（状态栏+按钮）和右侧200像素（按钮区域）
+        # 安全区域：避开顶部120像素（WS状态栏+Connect/Disconnect按钮）和右侧200像素（按钮区域）
         safe_left = iframe_box['x'] + 50
         safe_right = iframe_box['x'] + iframe_box['width'] - 200
-        safe_top = iframe_box['y'] + 80
+        safe_top = iframe_box['y'] + 120
         safe_bottom = iframe_box['y'] + iframe_box['height'] - 50
 
         # 确保安全区域有效

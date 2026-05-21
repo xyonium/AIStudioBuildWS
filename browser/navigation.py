@@ -109,9 +109,9 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
                 # 如果不是CONNECTED状态，尝试重连
                 if current_ws_status != "CONNECTED":
                     logger.info("WS断开，尝试重连...")
-                    reconnect_ws(page, logger)
-                    current_ws_status = get_ws_status(page, logger)
-                    logger.info(f"重连后WS状态: {current_ws_status}")
+                    new_status = reconnect_ws(page, logger)
+                    # reconnect_ws 已自行打印结果，这里只更新记录
+                    current_ws_status = new_status
                 
                 last_ws_status = current_ws_status
 
@@ -120,8 +120,9 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
                 is_valid = cookie_validator.validate_cookies_in_main_thread()
 
                 if not is_valid:
-                    cookie_validator.shutdown_instance_on_cookie_failure()
-                    return
+                    # Cookie确实失效（被重定向到登录页），抛异常让外层重启实例
+                    logger.error("Cookie验证失败: 被重定向到Google登录页，Cookie已失效")
+                    raise KeepAliveError("Cookie失效，需要重启浏览器实例")
 
                 click_counter = 0  # 重置计数器
 
