@@ -99,8 +99,8 @@ for i in $(seq 1 $MAX_CHECKS); do\n\
     fi\n\
 done\n\
 \n\
-# 给 fluxbox 一个最后的稳定期\n\
-sleep 2\n\
+# 等待桌面完全稳定后再启动主程序，特别是给第一个浏览器实例（User 1）一个完全就绪的桌面环境\n\
+sleep 30\n\
 echo "启动主程序..."\n\
 exec python main.py\n\
 ' > /app/start.sh

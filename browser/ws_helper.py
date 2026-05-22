@@ -49,19 +49,37 @@ def get_ws_status(page: Page, logger=None) -> str:
 def click_disconnect(page: Page, logger=None) -> bool:
     """
     点击Disconnect按钮断开WS连接（在iframe内部）。
+    优先使用 Playwright 的 locator 方法，兜底使用 JavaScript 直接触发。
     """
     try:
         frame = get_preview_frame(page, logger)
         if not frame:
             return False
-        
+
         disconnect_btn = frame.locator('button:has-text("Disconnect")')
         if disconnect_btn.count() > 0 and disconnect_btn.first.is_visible(timeout=3000):
-            disconnect_btn.first.click(timeout=5000)
-            if logger:
-                logger.info("已点击 Disconnect 按钮")
-            time.sleep(1)
-            return True
+            try:
+                disconnect_btn.first.click(timeout=5000)
+                if logger:
+                    logger.info("已点击 Disconnect 按钮")
+                time.sleep(1)
+                return True
+            except Exception as click_err:
+                if logger:
+                    logger.debug(f"Playwright Disconnect 点击失败，尝试 JS 兜底: {click_err}")
+                # JS 兜底
+                page.evaluate("""
+                    () => {
+                        const iframe = document.querySelector('iframe[title="Preview"]');
+                        if (iframe && iframe.contentDocument) {
+                            const btn = Array.from(iframe.contentDocument.querySelectorAll('button'))
+                                .find(b => b.textContent.includes('Disconnect'));
+                            if (btn) btn.click();
+                        }
+                    }
+                """)
+                time.sleep(1)
+                return True
         if logger:
             logger.warning("未找到可见的 Disconnect 按钮")
         return False
@@ -75,6 +93,7 @@ def click_connect(page: Page, logger=None) -> bool:
     """
     点击Connect按钮建立WS连接（在iframe内部）。
     如果按钮处于 disabled 状态（CONNECTING 过渡态），会等待最多15秒直到变为可用。
+    兜底使用 JavaScript 直接触发。
     """
     try:
         frame = get_preview_frame(page, logger)
@@ -95,7 +114,6 @@ def click_connect(page: Page, logger=None) -> bool:
         # 等待按钮变为 enabled 状态 (处理 CONNECTING 过渡态)
         try:
             connect_btn.first.wait_for(state='attached', timeout=15000)
-            # 等待 disabled 属性消失
             start = time.time()
             while time.time() - start < 15:
                 is_disabled = connect_btn.first.is_disabled()
@@ -108,7 +126,21 @@ def click_connect(page: Page, logger=None) -> bool:
             if logger:
                 logger.warning("等待 Connect 按钮变为可用超时，尝试强制点击")
 
-        connect_btn.first.click(timeout=5000)
+        try:
+            connect_btn.first.click(timeout=5000)
+        except Exception as click_err:
+            if logger:
+                logger.debug(f"Playwright Connect 点击失败，尝试 JS 兜底: {click_err}")
+            page.evaluate("""
+                () => {
+                    const iframe = document.querySelector('iframe[title="Preview"]');
+                    if (iframe && iframe.contentDocument) {
+                        const btn = Array.from(iframe.contentDocument.querySelectorAll('button'))
+                            .find(b => b.textContent.includes('Connect'));
+                        if (btn && !btn.disabled) btn.click();
+                    }
+                }
+            """)
         if logger:
             logger.info("已点击 Connect 按钮")
         time.sleep(1)
@@ -236,15 +268,7 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                     curr_x = max(iframe_box['x'] + 20, min(iframe_box['x'] + iframe_box['width'] - 20, curr_x + delta_x))
                     curr_y = max(iframe_box['y'] + 20, min(iframe_box['y'] + iframe_box['height'] - 20, curr_y + delta_y))
 
-                    # 使用 DOM 操作来 hover，避免 page.mouse.move 的死锁
-                    try:
-                        iframe.first.hover(
-                            position={"x": curr_x - iframe_box['x'], "y": curr_y - iframe_box['y']},
-                            force=True,
-                            timeout=100
-                        )
-                    except Exception:
-                        pass
+                    page.mouse.move(curr_x, curr_y)
                     time.sleep(0.05)
 
                     # 每次移动后检查遮罩是否关闭
@@ -302,35 +326,18 @@ def click_in_iframe(page: Page, logger=None) -> bool:
         curr_x = random.randint(int(safe_left), int(safe_right))
         curr_y = random.randint(int(safe_top), int(safe_bottom))
 
-        # 使用 Playwright 专门的基于坐标的模拟操作 (避开 page.mouse.move 在无头遮挡时可能死锁的问题)
-        # 通过在 iframe 对象上直接分发事件或定位坐标点击
-        iframe_element = iframe.first
-
-        # 随机移动几步
-        for _ in range(random.randint(3, 6)):
+        # 使用 page.mouse 进行模拟 (红点独立在每个 Firefox 进程内，不存在系统鼠标争夺)
+        for _ in range(random.randint(2, 4)):
             delta_x = random.randint(-30, 30)
             delta_y = random.randint(-20, 20)
             curr_x = max(int(safe_left), min(int(safe_right), curr_x + delta_x))
             curr_y = max(int(safe_top), min(int(safe_bottom), curr_y + delta_y))
 
-            # 使用相对坐标在 iframe 内部 hover
-            rel_x = curr_x - iframe_box['x']
-            rel_y = curr_y - iframe_box['y']
+            page.mouse.move(curr_x, curr_y)
+            time.sleep(0.1)
 
-            try:
-                iframe_element.hover(position={"x": rel_x, "y": rel_y}, force=True, timeout=1000)
-            except Exception:
-                pass
-            time.sleep(0.05)
-
-        # 在最终位置点击
-        try:
-            rel_x = curr_x - iframe_box['x']
-            rel_y = curr_y - iframe_box['y']
-            iframe_element.click(position={"x": rel_x, "y": rel_y}, force=True, timeout=1000)
-        except Exception:
-            pass
-
+        # 点击当前位置
+        page.mouse.click(curr_x, curr_y)
         if logger:
             logger.debug("click_in_iframe: 成功完成鼠标移动和点击")
         return True
