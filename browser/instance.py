@@ -277,7 +277,7 @@ def run_browser_instance(config, shutdown_event=None):
 
                 # 5. 所有验证通过，确认成功！
                 logger.info("所有验证通过，确认已成功登录并准备就绪")
-                handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator)
+                handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator, expected_path)
 
                 # 如果运行到这里且没有异常，表示实例正常结束（例如收到关闭信号）
                 # 正常结束时重置重试计数器

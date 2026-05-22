@@ -47,7 +47,7 @@ def handle_popup_dialog(page: Page, logger=None):
                     if button_locator.count() > 0 and button_locator.first.is_visible():
                         if logger:
                             logger.info(f"检测到弹窗按钮: '{button_name}'，正在点击...")
-                        button_locator.first.click(force=True, timeout=2000)
+                        button_locator.first.click(timeout=2000)
                         total_clicks += 1
                         clicked_in_round = True
                         any_found = True
@@ -66,7 +66,7 @@ def handle_popup_dialog(page: Page, logger=None):
     except Exception as e:
         logger.info(f"检查弹窗时发生意外：{e}，将继续执行...")
 
-def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdown_event=None, cookie_validator=None):
+def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdown_event=None, cookie_validator=None, expected_path=None):
     """
     在成功导航到目标页面后，执行后续操作（处理弹窗、保持运行）。
     """
@@ -113,6 +113,23 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
             break
 
         try:
+            # 【URL守护】：检查是否偏离了目标页面（如误触导航到了Terms页等）
+            if expected_path:
+                current_url = page.url
+                if expected_path not in current_url:
+                    logger.warning(f"检测到页面偏离！当前URL: {current_url}，预期路径: {expected_path}")
+                    logger.info("尝试导航回目标页面...")
+                    try:
+                        # 基于当前域名重建目标URL
+                        parsed = current_url.split('/')
+                        target_url = f"{parsed[0]}//{parsed[2]}/{expected_path.lstrip('/')}"
+                        logger.info(f"导航到: {target_url}")
+                        page.goto(target_url, wait_until='domcontentloaded', timeout=30000)
+                        time.sleep(3)
+                        handle_popup_dialog(page, logger=logger)
+                    except Exception as nav_e:
+                        logger.warning(f"URL守护导航失败: {nav_e}")
+
             # 检测并关闭interaction-modal遮罩层（如果出现）
             dismiss_interaction_modal(page, logger)
 
