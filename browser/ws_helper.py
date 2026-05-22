@@ -236,8 +236,15 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                     curr_x = max(iframe_box['x'] + 20, min(iframe_box['x'] + iframe_box['width'] - 20, curr_x + delta_x))
                     curr_y = max(iframe_box['y'] + 20, min(iframe_box['y'] + iframe_box['height'] - 20, curr_y + delta_y))
 
-                    # 恢复 Playwright 的鼠标操作
-                    page.mouse.move(curr_x, curr_y)
+                    # 使用 DOM 操作来 hover，避免 page.mouse.move 的死锁
+                    try:
+                        iframe.first.hover(
+                            position={"x": curr_x - iframe_box['x'], "y": curr_y - iframe_box['y']},
+                            force=True,
+                            timeout=100
+                        )
+                    except Exception:
+                        pass
                     time.sleep(0.05)
 
                     # 每次移动后检查遮罩是否关闭
@@ -295,19 +302,35 @@ def click_in_iframe(page: Page, logger=None) -> bool:
         curr_x = random.randint(int(safe_left), int(safe_right))
         curr_y = random.randint(int(safe_top), int(safe_bottom))
 
-        # 随机移动几步（保持在安全区域内）
+        # 使用 Playwright 专门的基于坐标的模拟操作 (避开 page.mouse.move 在无头遮挡时可能死锁的问题)
+        # 通过在 iframe 对象上直接分发事件或定位坐标点击
+        iframe_element = iframe.first
+
+        # 随机移动几步
         for _ in range(random.randint(3, 6)):
             delta_x = random.randint(-30, 30)
             delta_y = random.randint(-20, 20)
             curr_x = max(int(safe_left), min(int(safe_right), curr_x + delta_x))
             curr_y = max(int(safe_top), min(int(safe_bottom), curr_y + delta_y))
 
-            # 使用 Playwright 的鼠标操作，即使在后台也能正常生效
-            page.mouse.move(curr_x, curr_y)
+            # 使用相对坐标在 iframe 内部 hover
+            rel_x = curr_x - iframe_box['x']
+            rel_y = curr_y - iframe_box['y']
+
+            try:
+                iframe_element.hover(position={"x": rel_x, "y": rel_y}, force=True, timeout=1000)
+            except Exception:
+                pass
             time.sleep(0.05)
 
-        # 点击当前位置
-        page.mouse.click(curr_x, curr_y)
+        # 在最终位置点击
+        try:
+            rel_x = curr_x - iframe_box['x']
+            rel_y = curr_y - iframe_box['y']
+            iframe_element.click(position={"x": rel_x, "y": rel_y}, force=True, timeout=1000)
+        except Exception:
+            pass
+
         if logger:
             logger.debug("click_in_iframe: 成功完成鼠标移动和点击")
         return True
