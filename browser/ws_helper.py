@@ -268,6 +268,7 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                     curr_x = max(iframe_box['x'] + 20, min(iframe_box['x'] + iframe_box['width'] - 20, curr_x + delta_x))
                     curr_y = max(iframe_box['y'] + 20, min(iframe_box['y'] + iframe_box['height'] - 20, curr_y + delta_y))
 
+                    page.bring_to_front()
                     page.mouse.move(curr_x, curr_y)
                     time.sleep(0.05)
 
@@ -333,10 +334,12 @@ def click_in_iframe(page: Page, logger=None) -> bool:
             curr_x = max(int(safe_left), min(int(safe_right), curr_x + delta_x))
             curr_y = max(int(safe_top), min(int(safe_bottom), curr_y + delta_y))
 
+            page.bring_to_front()
             page.mouse.move(curr_x, curr_y)
             time.sleep(0.1)
 
         # 点击当前位置
+        page.bring_to_front()
         page.mouse.click(curr_x, curr_y)
         if logger:
             logger.debug("click_in_iframe: 成功完成鼠标移动和点击")

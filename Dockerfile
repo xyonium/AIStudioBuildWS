@@ -24,10 +24,12 @@ RUN camoufox fetch
 # 将项目中的所有文件拷贝到工作目录
 COPY . .
 # ====== 新增：配置 Fluxbox ======
-# 告诉窗口管理器：所有新窗口必须放在左上角(0,0)，这样就不会跑出屏幕了！
+# 告诉窗口管理器：使用层叠（Cascade）摆放策略，每次新窗口向右下角偏移一点点
+# 这样保证没有任何一个窗口会被100%完全遮挡！Firefox 就不会进入 Occlusion Sleep！
 RUN mkdir -p /root/.fluxbox && \
-    echo 'session.screen0.windowPlacement: TopLeft' > /root/.fluxbox/init && \
-    echo 'session.screen0.rowPlacement: TopBottom' >> /root/.fluxbox/init
+    echo 'session.screen0.windowPlacement: CascadePlacement' > /root/.fluxbox/init && \
+    echo 'session.screen0.rowPlacement: TopBottom' >> /root/.fluxbox/init && \
+    echo 'session.screen0.colPlacement: LeftRight' >> /root/.fluxbox/init
 # 修改启动脚本：启动 Xvfb -> VNC -> NoVNC网页服务 -> Python脚本
 # 修改启动脚本：增加 rm 锁文件 和 Xvfb 的 -ac 参数，以及完备的主动状态检测机制
 RUN echo '#!/bin/bash\n\

@@ -113,6 +113,9 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
             break
 
         try:
+            # 强制页面唤醒以防由于遮挡被引擎休眠 (Occlusion sleep)
+            page.bring_to_front()
+
             # 【URL守护】：检查是否偏离了目标页面（如误触导航到了Terms页等）
             if expected_path:
                 current_url = page.url
