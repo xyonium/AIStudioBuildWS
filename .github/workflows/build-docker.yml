@@ -4,8 +4,8 @@ on:
     branches: [ main ]
     paths:
       - 'Dockerfile'
-      - 'browser'
-      - 'utils'
+      - 'browser/*'
+      - 'utils/*'
 #  pull_request:
 #    branches: [ main ]
   workflow_dispatch:
