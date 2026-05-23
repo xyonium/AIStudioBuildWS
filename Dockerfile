@@ -29,8 +29,7 @@ COPY . .
 RUN mkdir -p /root/.fluxbox && \
     echo 'session.screen0.windowPlacement: CascadePlacement' > /root/.fluxbox/init && \
     echo 'session.screen0.rowPlacement: TopBottom' >> /root/.fluxbox/init && \
-    echo 'session.screen0.colPlacement: LeftRight' >> /root/.fluxbox/init && \
-    echo 'session.screen0.rootCommand: ' >> /root/.fluxbox/init
+    echo 'session.screen0.colPlacement: LeftRight' >> /root/.fluxbox/init
 # 修改启动脚本：启动 Xvfb -> VNC -> NoVNC网页服务 -> Python脚本
 # 修改启动脚本：增加 rm 锁文件 和 Xvfb 的 -ac 参数，以及完备的主动状态检测机制
 RUN echo '#!/bin/bash\n\
@@ -38,8 +37,12 @@ export DISPLAY=:99\n\
 \n\
 # 禁用 fbsetbg 以防止找不到壁纸设置器的弹窗\n\
 mkdir -p ~/.fluxbox\n\
-touch ~/.fluxbox/overlay\n\
-echo "background: none" >> ~/.fluxbox/overlay\n\
+echo "background: none" > ~/.fluxbox/overlay\n\
+# 创建一个空的 fbsetbg 脚本以彻底禁用它\n\
+mkdir -p /usr/local/bin\n\
+echo "#!/bin/sh" > /usr/local/bin/fbsetbg\n\
+echo "exit 0" >> /usr/local/bin/fbsetbg\n\
+chmod +x /usr/local/bin/fbsetbg\n\
 \n\
 # 清理可能残留的 X11 锁文件，防止容器重启后报错\n\
 rm -f /tmp/.X99-lock\n\
