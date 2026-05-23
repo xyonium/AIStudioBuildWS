@@ -275,6 +275,23 @@ def run_browser_instance(config, shutdown_event=None):
                     page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_auth_error_{diagnostic_tag}.png"))
                     return
 
+                # 新增检查：确保 App 的 iframe (Preview) 以及 WS 状态元素已经加载出来
+                # 否则说明页面并未真正渲染完毕，过早判定成功会导致保活机制找不到元素
+                logger.info("正在验证 App Preview 框架是否加载...")
+                try:
+                    # 等待 iframe 出现
+                    frame_element = page.locator('iframe[title="Preview"]')
+                    frame_element.first.wait_for(state='visible', timeout=15000)
+
+                    # 验证 iframe 内容加载
+                    # get_ws_status() 内部会等待 3 秒找 WS 文本，这里调用一次确保内容已出
+                    from browser.ws_helper import get_ws_status
+                    if get_ws_status(page) == "UNKNOWN":
+                        logger.warning("警告：iframe 已加载，但未检测到 WS 状态文本，可能是网络延迟或页面白屏")
+                except Exception as wait_e:
+                    logger.error(f"App Preview 框架未加载完成: {wait_e}")
+                    raise KeepAliveError("App Preview 框架未能在预期时间内加载完毕，将重试")
+
                 # 5. 所有验证通过，确认成功！
                 logger.info("所有验证通过，确认已成功登录并准备就绪")
                 handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator, expected_path)

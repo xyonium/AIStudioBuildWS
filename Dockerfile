@@ -39,7 +39,7 @@ export DISPLAY=:99\n\
 rm -f /tmp/.X99-lock\n\
 \n\
 # 1. 启动虚拟显示器 (加上 -ac 禁用访问控制，非常重要！)\n\
-Xvfb :99 -ac -screen 0 1600x1000x24 -nolisten tcp &\n\
+Xvfb :99 -ac -screen 0 1920x1080x24 -nolisten tcp &\n\
 sleep 2\n\
 \n\
 # 2. 启动窗口管理器\n\
