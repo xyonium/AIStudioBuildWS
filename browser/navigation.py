@@ -98,7 +98,9 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
     time.sleep(15)
 
     # 【兜底检查】：再次处理可能延迟出现的弹窗 (如 Terms/Continue 异步加载)
-    handle_popup_dialog(page, logger=logger)
+    for _ in range(3):
+        handle_popup_dialog(page, logger=logger)
+        time.sleep(2)
 
     # 记录初始WS状态
     last_ws_status = get_ws_status(page, logger)
