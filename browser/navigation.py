@@ -20,6 +20,7 @@ def handle_popup_dialog(page: Page, logger=None):
         "Continue to the app", # 欢迎/介绍弹窗
         "Got it",              # 提示弹窗
         "Got it, thanks",      # 感谢提示
+        "Agree",               # cookie横幅
         "Dismiss",             # 通知横幅关闭按钮
         "OK",                  # 通用确认
         "Accept",              # 接受
