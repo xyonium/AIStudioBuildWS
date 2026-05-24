@@ -58,7 +58,7 @@ def handle_popup_dialog(page: Page, logger=None):
     except Exception as e:
         logger.info(f"检查弹窗时发生意外：{e}，将继续执行...")
 
-def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdown_event=None, cookie_validator=None, expected_path=None):
+def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdown_event=None, cookie_validator=None, expected_path=None, expected_url=None):
     """
     在成功导航到目标页面后，执行后续操作（处理弹窗、保持运行）。
     """
