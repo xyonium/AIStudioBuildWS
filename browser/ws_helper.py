@@ -198,6 +198,13 @@ def reconnect_ws(page: Page, logger=None) -> str:
 
 def dismiss_interaction_modal(page: Page, logger=None) -> bool:
     try:
+        # 首先尝试通用的弹窗清理，这是导致偏移和遮挡的主要原因
+        try:
+            from browser.navigation import handle_popup_dialog
+            handle_popup_dialog(page, logger=logger)
+        except Exception:
+            pass
+
         modal = page.locator('div.interaction-modal')
         if modal.count() == 0 or not modal.first.is_visible(timeout=500):
             return False
@@ -237,6 +244,13 @@ def click_in_iframe(page: Page, logger=None) -> bool:
     try:
         if logger:
             logger.debug("开始执行 click_in_iframe 保活检测...")
+
+        # 移动之前，再次尝试清理所有弹窗 (兜底)
+        try:
+            from browser.navigation import handle_popup_dialog
+            handle_popup_dialog(page, logger=logger)
+        except Exception:
+            pass
 
         # ================= 调整：父页面保活 (不点击，仅移动/按键) =================
         # 点击 iframe 外部会导致 iframe 失去焦点，从而可能引发 websocket 1001 断开错误。

@@ -12,7 +12,6 @@ def handle_popup_dialog(page: Page, logger=None):
     """
     检查并处理所有弹窗/模态框。
     支持Google AI Studio常见弹窗（Terms、Tutorial、Got it、Continue等）。
-    只有在首次检测到弹窗时等待额外时间，确保异步加载的模态框完全渲染。
     """
     # 定义需要查找的按钮列表（按优先级排序）
     button_names = [
@@ -26,19 +25,14 @@ def handle_popup_dialog(page: Page, logger=None):
         "Accept",              # 接受
         "I agree",             # 同意
     ]
-    max_iterations = 10
+    max_iterations = 5 # 减少迭代次数，避免卡太久
     total_clicks = 0
-    any_found = False
 
     try:
         for iteration in range(max_iterations):
             clicked_in_round = False
-
-            if iteration == 0:
-                # 第一轮先等待，让异步弹窗完全加载
-                time.sleep(3)
-            else:
-                time.sleep(1)
+            # 缩短等待时间，让其更顺滑
+            time.sleep(0.5)
 
             for button_name in button_names:
                 try:
@@ -51,7 +45,6 @@ def handle_popup_dialog(page: Page, logger=None):
                         button_locator.first.click(timeout=2000)
                         total_clicks += 1
                         clicked_in_round = True
-                        any_found = True
                         time.sleep(1)
                 except Exception:
                     pass
@@ -61,8 +54,6 @@ def handle_popup_dialog(page: Page, logger=None):
 
         if total_clicks > 0:
             logger.info(f"弹窗处理完成, 共点击 {total_clicks} 次")
-        else:
-            logger.info("未检测到弹窗")
 
     except Exception as e:
         logger.info(f"检查弹窗时发生意外：{e}，将继续执行...")
@@ -100,7 +91,10 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
     # 【兜底检查】：再次处理可能延迟出现的弹窗 (如 Terms/Continue 异步加载)
     for _ in range(3):
         handle_popup_dialog(page, logger=logger)
-        time.sleep(2)
+        time.sleep(1)
+
+    # 【重要兜底】：在保活循环开始前再检查一次可能被忽略的遮罩或弹窗
+    handle_popup_dialog(page, logger=logger)
 
     # 记录初始WS状态
     last_ws_status = get_ws_status(page, logger)
