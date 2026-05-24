@@ -238,30 +238,26 @@ def click_in_iframe(page: Page, logger=None) -> bool:
         if logger:
             logger.debug("开始执行 click_in_iframe 保活检测...")
 
-        # ================= 新增：父页面保活点击 =================
+        # ================= 调整：父页面保活 (不点击，仅移动/按键) =================
+        # 点击 iframe 外部会导致 iframe 失去焦点，从而可能引发 websocket 1001 断开错误。
+        # 因此这里只移动鼠标、发送无害按键和滚动来保活父页面。
         try:
             page.bring_to_front()
+            viewport = page.viewport_size
+            if viewport:
+                move_x = random.randint(10, int(viewport['width']) - 10)
+                move_y = random.randint(10, int(viewport['height']) - 10)
+                page.mouse.move(move_x, move_y)
+                # 滚动鼠标滚轮
+                page.mouse.wheel(0, random.choice([-100, 100]))
+                # 发送无害按键作为活跃信号
+                page.keyboard.press("Shift")
 
-            # 方案 A: 尝试寻找左下角的输入框进行点击 (更真实的交互)
-            # 根据您说的 "左下角有个文本输入框"，我们尝试用通用的选择器去找
-            input_box = page.locator('textarea[placeholder*="ask" i], textarea, input[type="text"]').last
-            if input_box.count() > 0 and input_box.is_visible(timeout=500):
-                input_box.click()
                 if logger:
-                    logger.debug("已在父页面点击左下角文本框，防止云端容器休眠")
-            else:
-                # 方案 B: 兜底方案，在屏幕特定位置点击
-                viewport = page.viewport_size
-                if viewport:
-                    # 点击左下角区域 (X: 100, Y: 底部往上 50)
-                    click_y = viewport['height'] - 50
-                    page.mouse.move(100, click_y)
-                    page.mouse.click(100, click_y)
-                    if logger:
-                        logger.debug(f"已在父页面左下角({100}, {click_y})点击，防止云端容器休眠")
+                    logger.debug(f"已在父页面移动鼠标并触发按键保活，避免点击导致 1001 错误")
         except Exception as e:
             if logger:
-                logger.debug(f"父页面点击失败: {e}")
+                logger.debug(f"父页面保活操作失败: {e}")
         # =======================================================
 
         iframe = page.locator('iframe[title="Preview"]')
