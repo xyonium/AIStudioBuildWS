@@ -244,29 +244,60 @@ def run_browser_instance(config, shutdown_event=None):
                 
                 logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
-                # 2. 等待所有的 Spinner (加载圈) 消失
-                try:
-                    logger.info("正在等待页面上的加载指示器消失... (最长等待30秒)")
-                    spinners = page.locator('mat-spinner')
-                    count = spinners.count()
-                    if count > 0:
-                        for i in range(count):
-                            spinners.nth(i).wait_for(state='hidden', timeout=30000)
-                    logger.info("加载指示器已消失。页面已完成异步加载")
-                except TimeoutError:
-                    logger.warning("忽略 spinner 超时，尝试继续执行...")
+                # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击授权/警告弹窗
+                logger.info("正在进入智能等待：监控加载状态及处理突发弹窗 (最长30秒)...")
+                
+                # 扩展按钮匹配范围，囊括新版 "Continue to app" 警告和旧版 "Connect"
+                popup_btn_selectors = [
+                    'button:has-text("Continue to app")',
+                    'button:has-text("Continue to the app")',
+                    'button:has-text("Continue")',
+                    'button:has-text("继续")',
+                    'button:has-text("Connect")',
+                    'button:has-text("连接")',
+                    'button:has-text("确认连接")'
+                ]
+                popup_locator = page.locator(', '.join(popup_btn_selectors))
+                
+                wait_time = 0
+                max_wait = 30
+                
+                while wait_time < max_wait:
+                    # 第一步：环顾四周，只要看到任何已知的确认按钮，立刻点掉！
+                    try:
+                        # 用 500ms 的短超时快速瞥一眼，避免阻塞主循环
+                        if popup_locator.first.is_visible(timeout=500):
+                            btn_text = popup_locator.first.inner_text()
+                            logger.info(f"发现拦截弹窗按钮 [{btn_text}]，正在自动点击！")
+                            popup_locator.first.click()
+                            page.wait_for_timeout(1000)  # 点击后稍微等一下让动画消失
+                            continue  # 点完后立刻进入下一轮循环，防止后续还有其他弹窗或加载圈
+                    except Exception:
+                        pass  # 没找到或点击时DOM改变报错，直接静默忽略
 
-                # 3. 拦截并【自动点击】第三方 App 的“确认连接”弹窗
-                logger.info("检查是否有第三方 App 的连接确认弹窗...")
-                try:
-                    # 我们查找包含 "Connect"、"连接" 或 "确认" 文本的按钮
-                    confirm_btn = page.locator('button:has-text("Connect"), button:has-text("连接"), button:has-text("确认连接")')
-                    if confirm_btn.first.is_visible(timeout=3000):  # 等待最多3秒看弹窗是否出来
-                        logger.info("发现 '确认连接' 提示框，正在自动点击授权！")
-                        confirm_btn.first.click()
-                        page.wait_for_timeout(2000)  # 点完后等它消失
-                except Exception as e:
-                    pass  # 如果没有弹窗，就静默忽略，什么也不做
+                    # 第二步：检查是不是所有加载圈都已经消失了
+                    try:
+                        spinners = page.locator('mat-spinner')
+                        count = spinners.count()
+                        all_hidden = True
+                        if count > 0:
+                            for i in range(count):
+                                if spinners.nth(i).is_visible():
+                                    all_hidden = False
+                                    break
+                        
+                        if all_hidden:
+                            logger.info("所有加载指示器已消失。页面已完成初步加载。")
+                            break  # 加载圈没了，且刚刚也没发现弹窗，大功告成，跳出等待循环
+                    except Exception:
+                        pass  # DOM变化导致获取元素报错，忽略
+
+                    # 等待一小会儿，进入下一秒的轮询
+                    page.wait_for_timeout(1000)
+                    wait_time += 1
+                
+                if wait_time >= max_wait:
+                    logger.warning("30秒智能等待结束，页面可能仍有后台加载项或被未知的弹窗卡住，尝试强制继续...")
 
                 # 4. 最终鉴权错误检查（防身用）
                 auth_error_locator = page.get_by_text("authentication error", exact=False)
