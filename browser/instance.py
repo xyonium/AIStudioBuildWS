@@ -244,38 +244,47 @@ def run_browser_instance(config, shutdown_event=None):
                 
                 logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
-                # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击授权/警告弹窗
+                 # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击真正的弹窗按钮
                 logger.info("正在进入智能等待：监控加载状态及处理突发弹窗 (最长30秒)...")
                 
-                # 扩展按钮匹配范围，囊括新版 "Continue to app" 警告和旧版 "Connect"
-                popup_btn_selectors = [
-                    'button:has-text("Continue to app")',
-                    'button:has-text("Continue to the app")',
-                    'button:has-text("Continue")',
-                    'button:has-text("继续")',
-                    'button:has-text("Connect")',
-                    'button:has-text("连接")',
-                    'button:has-text("确认连接")'
+                # 定义要查找的精确按钮名称（优先处理最常见的新版警告）
+                target_button_names = [
+                    "Continue",             # 对应 Unlock more possibilities / 协议更新
+                    "Continue to app",      # 对应 This app is from another developer
+                    "Continue to the app",
+                    "Connect",              # 对应旧版授权
+                    "确认连接",
+                    "连接",
+                    "继续"
                 ]
-                popup_locator = page.locator(', '.join(popup_btn_selectors))
                 
                 wait_time = 0
                 max_wait = 30
                 
                 while wait_time < max_wait:
-                    # 第一步：环顾四周，只要看到任何已知的确认按钮，立刻点掉！
-                    try:
-                        # 用 500ms 的短超时快速瞥一眼，避免阻塞主循环
-                        if popup_locator.first.is_visible(timeout=500):
-                            btn_text = popup_locator.first.inner_text()
-                            logger.info(f"发现拦截弹窗按钮 [{btn_text}]，正在自动点击！")
-                            popup_locator.first.click()
-                            page.wait_for_timeout(1000)  # 点击后稍微等一下让动画消失
-                            continue  # 点完后立刻进入下一轮循环，防止后续还有其他弹窗或加载圈
-                    except Exception:
-                        pass  # 没找到或点击时DOM改变报错，直接静默忽略
+                    # 第一步：遍历寻找当前真正在前端、可见、且可点击的弹窗按钮
+                    clicked_any = False
+                    for btn_name in target_button_names:
+                        try:
+                            # 1. 使用 get_by_role 更加贴近人类用户的行为
+                            # 2. exact=True 确保不会把 "Continue to app" 误认为 "Continue"
+                            btn = page.get_by_role("button", name=btn_name, exact=True)
+                            
+                            # 关键防御：必须可见 且 必须未被禁用 且 只处理页面上找到的第一个
+                            if btn.first.is_visible(timeout=200) and btn.first.is_enabled(timeout=200):
+                                logger.info(f"成功锁定真实的弹窗按钮 [{btn_name}]，准备出击！")
+                                # force=True 可以无视轻微的遮挡，强行点击
+                                btn.first.click(force=True)
+                                page.wait_for_timeout(1000)  # 点击后给予 1 秒钟让弹窗动画消失
+                                clicked_any = True
+                                break  # 成功点掉一个后，跳出 for 循环，重新进行全盘扫描
+                        except Exception:
+                            continue  # 找不到这个按钮或报错，静默尝试下一个名字
 
-                    # 第二步：检查是不是所有加载圈都已经消失了
+                    if clicked_any:
+                        continue # 如果刚才发生了点击，立刻进入下一轮 while 循环，因为可能还有连环弹窗
+
+                    # 第二步：如果一圈下来没发现弹窗，我们来检查加载圈是否都消失了
                     try:
                         spinners = page.locator('mat-spinner')
                         count = spinners.count()
@@ -287,17 +296,17 @@ def run_browser_instance(config, shutdown_event=None):
                                     break
                         
                         if all_hidden:
-                            logger.info("所有加载指示器已消失。页面已完成初步加载。")
-                            break  # 加载圈没了，且刚刚也没发现弹窗，大功告成，跳出等待循环
+                            logger.info("所有加载指示器已消失。页面已完成初步加载且无拦截弹窗。")
+                            break  # 没有任何弹窗，且圈圈消失，大功告成，跳出 while 循环
                     except Exception:
                         pass  # DOM变化导致获取元素报错，忽略
 
-                    # 等待一小会儿，进入下一秒的轮询
+                    # 休息 1 秒后进行下一秒的轮询探测
                     page.wait_for_timeout(1000)
                     wait_time += 1
                 
                 if wait_time >= max_wait:
-                    logger.warning("30秒智能等待结束，页面可能仍有后台加载项或被未知的弹窗卡住，尝试强制继续...")
+                    logger.warning("30秒智能等待结束，页面可能仍有后台加载项，将强制执行后续流程...")
 
                 # 4. 最终鉴权错误检查（防身用）
                 auth_error_locator = page.get_by_text("authentication error", exact=False)
