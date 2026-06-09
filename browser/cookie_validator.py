@@ -65,7 +65,11 @@ class CookieValidator:
             retry_delay: 重试间隔(秒)
 
         Returns:
-            bool: Cookie是否有效 (网络问题时保守返回True)
+            bool: Cookie是否有效
+
+        Raises:
+            SystemExit: 当所有重试均因网络超时而失败时，强制退出当前子进程，
+                        防止带着失效Cookie无限重试导致内存泄漏。
         """
         for attempt in range(1, max_retries + 1):
             self.logger.info(f"开始Cookie验证... (第 {attempt}/{max_retries} 次)")
@@ -83,8 +87,14 @@ class CookieValidator:
                 self.logger.warning(f"Cookie验证网络超时，{retry_delay}秒后重试 ({attempt}/{max_retries})")
                 time.sleep(retry_delay)
             else:
-                # 所有重试都网络超时，保守假设Cookie仍有效（不杀进程）
-                self.logger.warning(f"Cookie验证: {max_retries}次尝试均网络超时，跳过本次验证（假设Cookie仍有效）")
-                return True
+                # ====== 终极修复第二步：废除危险的"跳过验证假设有效"逻辑 ======
+                # 旧逻辑已废弃：曾经会 return True 导致带着失效Cookie无限重试，现改为强制退出
+                # 新代码：强制退出当前子进程，阻断雪崩式内存泄漏
+                self.logger.error(
+                    f"Cookie验证: {max_retries}次尝试均网络超时，"
+                    f"判定为环境或Cookie异常，终止实例以防内存泄漏！"
+                )
+                raise SystemExit(1)
+                # ====================================================
 
         return True
