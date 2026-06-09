@@ -266,7 +266,7 @@ def run_browser_instance(config, shutdown_event=None):
 
                 logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
-                # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击真正的弹窗按钮
+                # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击真正的弹窗按钮（轮询模式）
                 logger.info("正在进入智能等待：监控加载状态及处理突发弹窗 (最长30秒)...")
                 # 定义要查找的精确按钮名称（优先处理最常见的新版警告）
                 target_button_names = [
@@ -274,29 +274,85 @@ def run_browser_instance(config, shutdown_event=None):
                     "Continue to app",  # 对应 This app is from another developer
                     "Continue to the app",
                     "Connect",  # 对应旧版授权
-                    "确认连接", "连接", "继续"
+                    "确认连接", "连接", "继续",
+                    "Dismiss", "Got it", "OK", "Accept", "I agree"
                 ]
 
                 wait_time = 0
                 max_wait = 30
+                last_clicked_index = -1  # 轮询指针，记录上次点击的按钮索引
+
                 while wait_time < max_wait:
-                    # 第一步：遍历寻找当前真正在前端、可见、且可点击的弹窗按钮
+                    # 第一步：轮询遍历所有候选按钮，找到第一个真正可点击的
                     clicked_any = False
-                    for btn_name in target_button_names:
+                    found_visible_button = None
+
+                    for idx, btn_name in enumerate(target_button_names):
                         try:
-                            # 1. 使用 get_by_role 更加贴近人类用户的行为
-                            # 2. exact=True 确保不会把 "Continue to app" 误认为 "Continue"
+                            # 策略1：使用 get_by_role（最贴近人类行为）
                             btn = page.get_by_role("button", name=btn_name, exact=True)
-                            # 关键防御：必须可见 且 必须未被禁用 且 只处理页面上找到的第一个
-                            if btn.first.is_visible(timeout=200) and btn.first.is_enabled(timeout=200):
-                                logger.info(f"成功锁定真实的弹窗按钮 [{btn_name}]，准备出击！")
-                                # force=True 可以无视轻微的遮挡，强行点击
-                                btn.first.click(force=True)
-                                page.wait_for_timeout(1000)  # 点击后给予 1 秒钟让弹窗动画消失
-                                clicked_any = True
-                                break  # 成功点掉一个后，跳出 for 循环，重新进行全盘扫描
+                            if btn.count() > 0 and btn.first.is_visible(timeout=100):
+                                # 额外检查：确保按钮在视口内且未被禁用
+                                box = btn.first.bounding_box()
+                                if box and box['width'] > 0 and box['height'] > 0:
+                                    found_visible_button = ("role", btn_name, btn.first, idx)
+                                    break
+
+                            # 策略2：兜底方案 - 直接文本匹配（处理非标准 button 元素）
+                            # 匹配 button、div[role="button"]、span[role="button"] 等
+                            text_btn = page.locator(
+                                f"button:has-text('{btn_name}'), "
+                                f"[role='button']:has-text('{btn_name}'), "
+                                f"button:text-is('{btn_name}')"
+                            )
+                            if text_btn.count() > 0 and text_btn.first.is_visible(timeout=100):
+                                box = text_btn.first.bounding_box()
+                                if box and box['width'] > 0 and box['height'] > 0:
+                                    found_visible_button = ("text", btn_name, text_btn.first, idx)
+                                    break
+
                         except Exception:
                             continue  # 找不到这个按钮或报错，静默尝试下一个名字
+
+                    if found_visible_button:
+                        strategy, btn_name, btn_locator, idx = found_visible_button
+                        logger.info(f"发现可见按钮 [{btn_name}]（策略: {strategy}），尝试点击...")
+
+                        try:
+                            # 尝试多种点击策略
+                            click_success = False
+
+                            # 策略A：标准点击 + force=True
+                            try:
+                                btn_locator.click(force=True, timeout=2000)
+                                click_success = True
+                            except Exception as e1:
+                                logger.debug(f"标准点击失败: {e1}")
+
+                            # 策略B：JavaScript 直接触发 click 事件（绕过所有遮挡检测）
+                            if not click_success:
+                                try:
+                                    page.evaluate("""
+                                        (element) => {
+                                            if (element) {
+                                                element.click();
+                                                return true;
+                                            }
+                                            return false;
+                                        }
+                                    """, btn_locator.element_handle())
+                                    click_success = True
+                                except Exception as e2:
+                                    logger.debug(f"JavaScript 点击失败: {e2}")
+
+                            if click_success:
+                                logger.info(f"成功点击按钮 [{btn_name}]")
+                                clicked_any = True
+                                last_clicked_index = idx
+                                page.wait_for_timeout(1500)  # 点击后给予 1.5 秒让弹窗动画消失
+
+                        except Exception as click_e:
+                            logger.warning(f"点击按钮 [{btn_name}] 时出错: {click_e}")
 
                     if clicked_any:
                         continue  # 如果刚才发生了点击，立刻进入下一轮 while 循环，因为可能还有连环弹窗
