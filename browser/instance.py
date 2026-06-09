@@ -126,6 +126,8 @@ def run_browser_instance(config, shutdown_event=None):
     # =========================================================================
     # 重启控制变量
     max_retries = int(os.getenv("MAX_RESTART_RETRIES", "5"))
+    # 人工干预等待超时（秒），通过环境变量配置，默认 10 分钟
+    manual_login_timeout = int(os.getenv("MANUAL_LOGIN_TIMEOUT", "600"))
     retry_count = 0
     base_delay = 3
 
@@ -135,21 +137,22 @@ def run_browser_instance(config, shutdown_event=None):
             logger.info("检测到全局关闭事件，浏览器实例不再启动，准备退出")
             return
 
-        # ====== 终极修复第一步：启动前强制清理僵尸进程和回收内存 ======
+        # ====== 启动前强制清理当前实例的僵尸进程和回收内存 ======
         try:
             # 强制 Python 垃圾回收，释放上一轮残留的 Playwright 对象
             gc.collect()
 
-            # 清理可能残留的 camoufox 孤儿进程
-            # 只杀死没有父进程管理的僵尸 camoufox 进程
+            # 【安全修复】只清理属于当前 profile 的孤儿进程，避免误杀其他用户实例
+            # camoufox 启动命令中包含 -profile /app/camoufox_profiles/USER_COOKIE_X
+            escaped_profile_dir = profile_dir.replace("/", "\\/")
             subprocess.run(
-                "pkill -f 'camoufox-bin.*--no-remote' || true",
+                f"pkill -f 'camoufox-bin.*-profile.*{escaped_profile_dir}' || true",
                 shell=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
             time.sleep(2)  # 给 OS 一点时间回收内存
-            logger.debug("已完成启动前清理（垃圾回收 + 僵尸进程清理）")
+            logger.debug(f"已完成启动前清理（垃圾回收 + {diagnostic_tag} 僵尸进程清理）")
         except Exception:
             pass
         # ====================================================
@@ -166,6 +169,34 @@ def run_browser_instance(config, shutdown_event=None):
 
                 # 创建Cookie验证器 (原有代码不需要改，context 对象完美兼容)
                 cookie_validator = CookieValidator(page, context, logger)
+
+                # ====== 401 致命错误拦截：通过监听网络请求捕获 API 级别的认证失败 ======
+                # 401/UNAUTHENTICATED 是 API 响应级别的错误，不会出现在页面文本中
+                # 必须通过拦截 HTTP 响应来检测
+                auth_failure_detected = [False]  # 使用列表以便在闭包中修改
+
+                def on_response(response):
+                    """监听所有 HTTP 响应，检测 401 认证失败"""
+                    if response.status == 401 or response.status == 403:
+                        url = response.url
+                        # 只关注 API 请求的认证失败（排除静态资源、图片等）
+                        if any(api_pattern in url for api_pattern in [
+                            "/api/",
+                            "generativelanguage.googleapis.com",
+                            "alkalimakersuite-pa.clients6.google.com",
+                            "aistudio.google.com/prompts",
+                            "aistudio.google.com/api",
+                            "firebaseinstallations.googleapis.com",
+                            "securetoken.googleapis.com",
+                        ]):
+                            logger.error(
+                                f"[{diagnostic_tag}] 检测到 API 认证失败！"
+                                f"URL: {url[:120]}... 状态码: {response.status}"
+                            )
+                            auth_failure_detected[0] = True
+
+                page.on("response", on_response)
+                # ====================================================
 
                 # =============================================================
                 # 下方的 page.goto() 等业务逻辑完全不需要改动！！！
@@ -240,7 +271,7 @@ def run_browser_instance(config, shutdown_event=None):
 
                 expected_path = extract_url_path(expected_url).split('?')[0]
 
-                # 1. 目标页面等待逻辑
+                # 1. 目标页面等待逻辑（支持通过环境变量 MANUAL_LOGIN_TIMEOUT 配置超时时间）
                 def is_at_target_url():
                     current_path = extract_url_path(page.url)
                     return expected_path and expected_path in current_path
@@ -249,13 +280,13 @@ def run_browser_instance(config, shutdown_event=None):
                     logger.warning(f"[{diagnostic_tag}] 尚未到达目标页面！当前在: {mask_url_for_logging(page.url)}")
                     logger.warning(f"[{diagnostic_tag}] 可能是遇到了登录、Passkey提示、或安全检查...")
                     logger.warning(f"[{diagnostic_tag}] >>> 请立即前往 VNC 桌面 (http://IP:6080) 手动完成操作！")
-                    logger.warning(f"[{diagnostic_tag}] >>> 脚本将在此挂起等待，直到浏览器到达目标页面，最多等待 5 分钟...")
+                    logger.warning(f"[{diagnostic_tag}] >>> 脚本将在此挂起等待，最多等待 {manual_login_timeout} 秒 (可通过 MANUAL_LOGIN_TIMEOUT 环境变量调整)...")
                     wait_time = 0
-                    while not is_at_target_url() and wait_time < 300:
+                    while not is_at_target_url() and wait_time < manual_login_timeout:
                         page.wait_for_timeout(5000)
                         wait_time += 5
                     if not is_at_target_url():
-                        logger.error(f"[{diagnostic_tag}] 5分钟内未到达目标页面，退出并放弃该实例。")
+                        logger.error(f"[{diagnostic_tag}] {manual_login_timeout}秒内未到达目标页面，退出并放弃该实例。")
                         page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_manual_action_timeout_{diagnostic_tag}.png"))
                         return
                     else:
@@ -263,19 +294,12 @@ def run_browser_instance(config, shutdown_event=None):
 
                 logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
-                # ====== 终极修复：OAuth 401 致命错误拦截 ======
-                # 在智能等待之前，先检查页面是否显示了 OAuth 认证失败的错误信息
-                try:
-                    page_text = page.inner_text('body', timeout=3000)
-                    if ("UNAUTHENTICATED" in page_text or 
-                        "invalid authentication credentials" in page_text or
-                        "401" in page_text and "OAuth" in page_text):
-                        logger.error(f"[{diagnostic_tag}] 检测到 OAuth 401 认证彻底失效！Cookie/Token 已过期。")
-                        logger.error(f"[{diagnostic_tag}] 为防止内存泄漏，当前实例将立即停止，不再重试！请手动更新 Cookie。")
-                        page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
-                        return  # 直接 return 杀死当前进程，绝不进入 while True 重试
-                except Exception:
-                    pass
+                # ====== 401 致命错误检查点 1：导航后立即检查 ======
+                if auth_failure_detected[0]:
+                    logger.error(f"[{diagnostic_tag}] 导航阶段检测到 API 401 认证失败！Cookie/Token 已过期。")
+                    logger.error(f"[{diagnostic_tag}] 为防止内存泄漏，当前实例将立即停止，不再重试！请手动更新 Cookie。")
+                    page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
+                    return
                 # ====================================================
 
                 # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击真正的弹窗按钮
@@ -292,6 +316,14 @@ def run_browser_instance(config, shutdown_event=None):
                 wait_time = 0
                 max_wait = 30
                 while wait_time < max_wait:
+                    # ====== 401 致命错误检查点 2：每轮智能等待中也检查 ======
+                    if auth_failure_detected[0]:
+                        logger.error(f"[{diagnostic_tag}] 等待阶段检测到 API 401 认证失败！Cookie/Token 已过期。")
+                        logger.error(f"[{diagnostic_tag}] 当前实例将立即停止，不再重试！请手动更新 Cookie。")
+                        page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
+                        return
+                    # ====================================================
+
                     # 第一步：遍历寻找当前真正在前端、可见、且可点击的弹窗按钮
                     clicked_any = False
                     for btn_name in target_button_names:
@@ -336,7 +368,15 @@ def run_browser_instance(config, shutdown_event=None):
                 if wait_time >= max_wait:
                     logger.warning("30秒智能等待结束，页面可能仍有后台加载项，将强制执行后续流程...")
 
-                # 4. 最终鉴权错误检查（防身用）
+                # ====== 401 致命错误检查点 3：智能等待结束后最终确认 ======
+                if auth_failure_detected[0]:
+                    logger.error(f"[{diagnostic_tag}] 智能等待期间累计检测到 API 401 认证失败！Cookie/Token 已过期。")
+                    logger.error(f"[{diagnostic_tag}] 当前实例将立即停止，不再重试！请手动更新 Cookie。")
+                    page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
+                    return
+                # ====================================================
+
+                # 4. 最终鉴权错误检查（防身用）— 检查页面上是否有可见的认证错误文本
                 auth_error_locator = page.get_by_text("authentication error", exact=False)
                 if auth_error_locator.is_visible(timeout=2000):
                     logger.error(f"检测到认证失败错误。Cookie已过期或无效")
@@ -359,6 +399,20 @@ def run_browser_instance(config, shutdown_event=None):
                 except Exception as wait_e:
                     logger.error(f"App Preview 框架未加载完成: {wait_e}")
                     raise KeepAliveError("App Preview 框架未能在预期时间内加载完毕，将重试")
+
+                # ====== 401 致命错误检查点 4：iframe 加载后最终确认 ======
+                if auth_failure_detected[0]:
+                    logger.error(f"[{diagnostic_tag}] iframe 加载阶段检测到 API 401 认证失败！Cookie/Token 已过期。")
+                    logger.error(f"[{diagnostic_tag}] 当前实例将立即停止，不再重试！请手动更新 Cookie。")
+                    page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
+                    return
+                # ====================================================
+
+                # 移除 response 监听器，避免在后续保活阶段重复触发
+                try:
+                    page.remove_listener("response", on_response)
+                except Exception:
+                    pass
 
                 # 5. 所有验证通过，确认成功！
                 logger.info("所有验证通过，确认已成功登录并准备就绪")
