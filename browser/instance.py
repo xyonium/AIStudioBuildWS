@@ -2,6 +2,8 @@ import os
 import signal
 import time
 import json
+import subprocess
+import gc
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
 from utils.logger import setup_logging
 from utils.cookie_manager import CookieManager
@@ -34,7 +36,8 @@ def run_browser_instance(config, shutdown_event=None):
 
     instance_label = cookie_source.display_name
     logger = setup_logging(
-        os.path.join(logs_dir(), 'app.log'), prefix=instance_label
+        os.path.join(logs_dir(), 'app.log'),
+        prefix=instance_label
     )
     diagnostic_tag = instance_label.replace(os.sep, "_")
 
@@ -69,22 +72,23 @@ def run_browser_instance(config, shutdown_event=None):
     if proxy:
         logger.info(f"使用代理: {proxy} 访问")
         launch_options["proxy"] = {"server": proxy, "bypass": "localhost, 127.0.0.1"}
-    
+
     screenshot_dir = logs_dir()
     ensure_dir(screenshot_dir)
 
     # ================= [新增代码：多用户 Profile 和指纹管理] =================
     profiles_base_dir = "/app/camoufox_profiles"
     ensure_dir(profiles_base_dir)
-    
+
     # 使用 identifier (如 USER_COOKIE_1) 作为文件夹名，实现多用户完全隔离
     profile_dir = os.path.join(profiles_base_dir, diagnostic_tag)
     ensure_dir(profile_dir)
+
     fingerprint_file = os.path.join(profile_dir, "fingerprint.json")
     if os.path.exists(fingerprint_file):
         with open(fingerprint_file, "r") as f:
             fingerprint_opts = json.load(f)
-            logger.info(f"已加载现有的环境指纹和 Profile: {profile_dir}")
+        logger.info(f"已加载现有的环境指纹和 Profile: {profile_dir}")
     else:
         # ====== 新增/修改代码开始 ======
         # 不要传 screen 参数了，让它自己随机，防止被风控
@@ -92,35 +96,34 @@ def run_browser_instance(config, shutdown_event=None):
             user_data_dir=profile_dir,
             os="windows",
         )
-        
         # 强制 Firefox 启动时最大化或指定宽高
         # -width 1440 -height 900 是 Firefox 底层的 CLI 参数
         if "args" not in fingerprint_opts:
             fingerprint_opts["args"] = []
         fingerprint_opts["args"].extend(["-width", "1440", "-height", "900"])
         # ====== 新增/修改代码结束 ======
-        
         with open(fingerprint_file, "w") as f:
             json.dump(fingerprint_opts, f, indent=4)
-            logger.info(f"已生成并锁定全新环境指纹: {profile_dir}")
-    
+        logger.info(f"已生成并锁定全新环境指纹: {profile_dir}")
+
     # 将指纹和持久化设置合并到 Camoufox 启动选项中
     launch_options["from_options"] = fingerprint_opts
     launch_options["persistent_context"] = True
     launch_options["user_data_dir"] = profile_dir
+
     # [新增] 强制 Firefox 禁用后台资源冻结、标签页休眠和遮挡跟踪 (Occlusion Tracking)
     # 这对多窗口/多标签页在无头环境下能否持续运行至关重要
     launch_options["firefox_user_prefs"] = {
-        "browser.tabs.unloadOnLowMemory": False, # 禁用低内存卸载
-        "dom.min_background_timeout_value": 4,   # 维持后台计时器频率
-        "network.websocket.timeout": 0,          # 禁用WS超时
-        "page_visibility.dont_suspend_inactive": True, # 防止非活动页面挂起
+        "browser.tabs.unloadOnLowMemory": False,  # 禁用低内存卸载
+        "dom.min_background_timeout_value": 4,  # 维持后台计时器频率
+        "network.websocket.timeout": 0,  # 禁用WS超时
+        "page_visibility.dont_suspend_inactive": True,  # 防止非活动页面挂起
         "dom.timeout.enable_budget_timer_fallback": False,
-        "widget.windows.window_occlusion_tracking.enabled": False, # 禁用遮挡跟踪（如果窗口被遮挡，原本会挂起渲染）
-        "gfx.webrender.dcomp-win.enabled": False # 关闭可能导致黑屏或不渲染的硬件加速遮挡
+        "widget.windows.window_occlusion_tracking.enabled": False,  # 禁用遮挡跟踪（如果窗口被遮挡，原本会挂起渲染）
+        "gfx.webrender.dcomp-win.enabled": False  # 关闭可能导致黑屏或不渲染的硬件加速遮挡
     }
-    # =========================================================================
 
+    # =========================================================================
     # 重启控制变量
     max_retries = int(os.getenv("MAX_RESTART_RETRIES", "5"))
     retry_count = 0
@@ -132,12 +135,31 @@ def run_browser_instance(config, shutdown_event=None):
             logger.info("检测到全局关闭事件，浏览器实例不再启动，准备退出")
             return
 
+        # ====== 终极修复第一步：启动前强制清理僵尸进程和回收内存 ======
+        try:
+            # 强制 Python 垃圾回收，释放上一轮残留的 Playwright 对象
+            gc.collect()
+
+            # 清理可能残留的 camoufox 孤儿进程
+            # 只杀死没有父进程管理的僵尸 camoufox 进程
+            subprocess.run(
+                "pkill -f 'camoufox-bin.*--no-remote' || true",
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            time.sleep(2)  # 给 OS 一点时间回收内存
+            logger.debug("已完成启动前清理（垃圾回收 + 僵尸进程清理）")
+        except Exception:
+            pass
+        # ====================================================
+
         try:
             # === [修改代码：由于开启了持久化，Camoufox 返回的是 BrowserContext] ===
             with Camoufox(**launch_options) as context:
                 # 获取持久化上下文中已有的默认页面，如果没有则新建
                 page = context.pages[0] if context.pages else context.new_page()
-                
+
                 # 依然兼容你现有的环境变量/JSON导入逻辑（当作初始凭证注入）
                 if cookies:
                     context.add_cookies(cookies)
@@ -146,18 +168,18 @@ def run_browser_instance(config, shutdown_event=None):
                 cookie_validator = CookieValidator(page, context, logger)
 
                 # =============================================================
-                
                 # 下方的 page.goto() 等业务逻辑完全不需要改动！！！
+
                 response = None
                 try:
                     logger.info(f"正在导航到: {mask_url_for_logging(expected_url)} (超时设置为 90 秒)")
                     # page.goto() 会返回一个 response 对象，我们可以用它来获取状态码等信息
                     response = page.goto(expected_url, wait_until='domcontentloaded', timeout=90000)
-                    
+
                     # 检查HTTP响应状态码
                     if response:
                         logger.info(f"导航初步成功，服务器响应状态码: {response.status} {response.status_text}")
-                        if not response.ok: # response.ok 检查状态码是否在 200-299 范围内
+                        if not response.ok:  # response.ok 检查状态码是否在 200-299 范围内
                             logger.warning(f"警告：页面加载成功，但HTTP状态码表示错误: {response.status}")
                             # 即使状态码错误，也保存快照以供分析
                             page.screenshot(path=os.path.join(screenshot_dir, f"WARN_http_status_{response.status}_{diagnostic_tag}.png"))
@@ -213,12 +235,11 @@ def run_browser_instance(config, shutdown_event=None):
                     raise KeepAliveError(f"网络错误: {error_message}")
 
                 # --- 如果导航没有抛出异常，继续执行后续逻辑 ---
-                
                 logger.info("页面初步加载完成，正在检查并处理初始弹窗...")
                 page.wait_for_timeout(2000)
 
                 expected_path = extract_url_path(expected_url).split('?')[0]
-                
+
                 # 1. 目标页面等待逻辑
                 def is_at_target_url():
                     current_path = extract_url_path(page.url)
@@ -229,38 +250,47 @@ def run_browser_instance(config, shutdown_event=None):
                     logger.warning(f"[{diagnostic_tag}] 可能是遇到了登录、Passkey提示、或安全检查...")
                     logger.warning(f"[{diagnostic_tag}] >>> 请立即前往 VNC 桌面 (http://IP:6080) 手动完成操作！")
                     logger.warning(f"[{diagnostic_tag}] >>> 脚本将在此挂起等待，直到浏览器到达目标页面，最多等待 5 分钟...")
-                    
                     wait_time = 0
                     while not is_at_target_url() and wait_time < 300:
                         page.wait_for_timeout(5000)
                         wait_time += 5
-                        
                     if not is_at_target_url():
                         logger.error(f"[{diagnostic_tag}] 5分钟内未到达目标页面，退出并放弃该实例。")
                         page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_manual_action_timeout_{diagnostic_tag}.png"))
                         return
                     else:
                         logger.info(f"[{diagnostic_tag}] 人工操作完成，成功到达目标页面！")
-                
+
                 logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
-                 # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击真正的弹窗按钮
+                # ====== 终极修复：OAuth 401 致命错误拦截 ======
+                # 在智能等待之前，先检查页面是否显示了 OAuth 认证失败的错误信息
+                try:
+                    page_text = page.inner_text('body', timeout=3000)
+                    if ("UNAUTHENTICATED" in page_text or 
+                        "invalid authentication credentials" in page_text or
+                        "401" in page_text and "OAuth" in page_text):
+                        logger.error(f"[{diagnostic_tag}] 检测到 OAuth 401 认证彻底失效！Cookie/Token 已过期。")
+                        logger.error(f"[{diagnostic_tag}] 为防止内存泄漏，当前实例将立即停止，不再重试！请手动更新 Cookie。")
+                        page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
+                        return  # 直接 return 杀死当前进程，绝不进入 while True 重试
+                except Exception:
+                    pass
+                # ====================================================
+
+                # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击真正的弹窗按钮
                 logger.info("正在进入智能等待：监控加载状态及处理突发弹窗 (最长30秒)...")
-                
                 # 定义要查找的精确按钮名称（优先处理最常见的新版警告）
                 target_button_names = [
-                    "Continue",             # 对应 Unlock more possibilities / 协议更新
-                    "Continue to app",      # 对应 This app is from another developer
+                    "Continue",  # 对应 Unlock more possibilities / 协议更新
+                    "Continue to app",  # 对应 This app is from another developer
                     "Continue to the app",
-                    "Connect",              # 对应旧版授权
-                    "确认连接",
-                    "连接",
-                    "继续"
+                    "Connect",  # 对应旧版授权
+                    "确认连接", "连接", "继续"
                 ]
-                
+
                 wait_time = 0
                 max_wait = 30
-                
                 while wait_time < max_wait:
                     # 第一步：遍历寻找当前真正在前端、可见、且可点击的弹窗按钮
                     clicked_any = False
@@ -269,7 +299,6 @@ def run_browser_instance(config, shutdown_event=None):
                             # 1. 使用 get_by_role 更加贴近人类用户的行为
                             # 2. exact=True 确保不会把 "Continue to app" 误认为 "Continue"
                             btn = page.get_by_role("button", name=btn_name, exact=True)
-                            
                             # 关键防御：必须可见 且 必须未被禁用 且 只处理页面上找到的第一个
                             if btn.first.is_visible(timeout=200) and btn.first.is_enabled(timeout=200):
                                 logger.info(f"成功锁定真实的弹窗按钮 [{btn_name}]，准备出击！")
@@ -282,7 +311,7 @@ def run_browser_instance(config, shutdown_event=None):
                             continue  # 找不到这个按钮或报错，静默尝试下一个名字
 
                     if clicked_any:
-                        continue # 如果刚才发生了点击，立刻进入下一轮 while 循环，因为可能还有连环弹窗
+                        continue  # 如果刚才发生了点击，立刻进入下一轮 while 循环，因为可能还有连环弹窗
 
                     # 第二步：如果一圈下来没发现弹窗，我们来检查加载圈是否都消失了
                     try:
@@ -294,7 +323,6 @@ def run_browser_instance(config, shutdown_event=None):
                                 if spinners.nth(i).is_visible():
                                     all_hidden = False
                                     break
-                        
                         if all_hidden:
                             logger.info("所有加载指示器已消失。页面已完成初步加载且无拦截弹窗。")
                             break  # 没有任何弹窗，且圈圈消失，大功告成，跳出 while 循环
@@ -304,7 +332,7 @@ def run_browser_instance(config, shutdown_event=None):
                     # 休息 1 秒后进行下一秒的轮询探测
                     page.wait_for_timeout(1000)
                     wait_time += 1
-                
+
                 if wait_time >= max_wait:
                     logger.warning("30秒智能等待结束，页面可能仍有后台加载项，将强制执行后续流程...")
 
@@ -346,7 +374,6 @@ def run_browser_instance(config, shutdown_event=None):
             if retry_count > max_retries:
                 logger.error(f"重试次数已达上限 ({max_retries})，实例不再重启，退出")
                 return
-            
             # 指数退避：3秒、6秒、12秒、24秒...最长60秒
             delay = min(base_delay * (2 ** (retry_count - 1)), 60)
             logger.error(f"浏览器实例出现错误 (重试 {retry_count}/{max_retries})，将在 {delay} 秒后重启浏览器实例: {e}")
