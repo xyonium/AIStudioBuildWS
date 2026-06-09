@@ -170,34 +170,6 @@ def run_browser_instance(config, shutdown_event=None):
                 # 创建Cookie验证器 (原有代码不需要改，context 对象完美兼容)
                 cookie_validator = CookieValidator(page, context, logger)
 
-                # ====== 401 致命错误拦截：通过监听网络请求捕获 API 级别的认证失败 ======
-                # 401/UNAUTHENTICATED 是 API 响应级别的错误，不会出现在页面文本中
-                # 必须通过拦截 HTTP 响应来检测
-                auth_failure_detected = [False]  # 使用列表以便在闭包中修改
-
-                def on_response(response):
-                    """监听所有 HTTP 响应，检测 401 认证失败"""
-                    if response.status == 401 or response.status == 403:
-                        url = response.url
-                        # 只关注 API 请求的认证失败（排除静态资源、图片等）
-                        if any(api_pattern in url for api_pattern in [
-                            "/api/",
-                            "generativelanguage.googleapis.com",
-                            "alkalimakersuite-pa.clients6.google.com",
-                            "aistudio.google.com/prompts",
-                            "aistudio.google.com/api",
-                            "firebaseinstallations.googleapis.com",
-                            "securetoken.googleapis.com",
-                        ]):
-                            logger.error(
-                                f"[{diagnostic_tag}] 检测到 API 认证失败！"
-                                f"URL: {url[:120]}... 状态码: {response.status}"
-                            )
-                            auth_failure_detected[0] = True
-
-                page.on("response", on_response)
-                # ====================================================
-
                 # =============================================================
                 # 下方的 page.goto() 等业务逻辑完全不需要改动！！！
 
@@ -294,14 +266,6 @@ def run_browser_instance(config, shutdown_event=None):
 
                 logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
-                # ====== 401 致命错误检查点 1：导航后立即检查 ======
-                if auth_failure_detected[0]:
-                    logger.error(f"[{diagnostic_tag}] 导航阶段检测到 API 401 认证失败！Cookie/Token 已过期。")
-                    logger.error(f"[{diagnostic_tag}] 为防止内存泄漏，当前实例将立即停止，不再重试！请手动更新 Cookie。")
-                    page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
-                    return
-                # ====================================================
-
                 # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击真正的弹窗按钮
                 logger.info("正在进入智能等待：监控加载状态及处理突发弹窗 (最长30秒)...")
                 # 定义要查找的精确按钮名称（优先处理最常见的新版警告）
@@ -316,14 +280,6 @@ def run_browser_instance(config, shutdown_event=None):
                 wait_time = 0
                 max_wait = 30
                 while wait_time < max_wait:
-                    # ====== 401 致命错误检查点 2：每轮智能等待中也检查 ======
-                    if auth_failure_detected[0]:
-                        logger.error(f"[{diagnostic_tag}] 等待阶段检测到 API 401 认证失败！Cookie/Token 已过期。")
-                        logger.error(f"[{diagnostic_tag}] 当前实例将立即停止，不再重试！请手动更新 Cookie。")
-                        page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
-                        return
-                    # ====================================================
-
                     # 第一步：遍历寻找当前真正在前端、可见、且可点击的弹窗按钮
                     clicked_any = False
                     for btn_name in target_button_names:
@@ -368,14 +324,6 @@ def run_browser_instance(config, shutdown_event=None):
                 if wait_time >= max_wait:
                     logger.warning("30秒智能等待结束，页面可能仍有后台加载项，将强制执行后续流程...")
 
-                # ====== 401 致命错误检查点 3：智能等待结束后最终确认 ======
-                if auth_failure_detected[0]:
-                    logger.error(f"[{diagnostic_tag}] 智能等待期间累计检测到 API 401 认证失败！Cookie/Token 已过期。")
-                    logger.error(f"[{diagnostic_tag}] 当前实例将立即停止，不再重试！请手动更新 Cookie。")
-                    page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
-                    return
-                # ====================================================
-
                 # 4. 最终鉴权错误检查（防身用）— 检查页面上是否有可见的认证错误文本
                 auth_error_locator = page.get_by_text("authentication error", exact=False)
                 if auth_error_locator.is_visible(timeout=2000):
@@ -400,23 +348,41 @@ def run_browser_instance(config, shutdown_event=None):
                     logger.error(f"App Preview 框架未加载完成: {wait_e}")
                     raise KeepAliveError("App Preview 框架未能在预期时间内加载完毕，将重试")
 
-                # ====== 401 致命错误检查点 4：iframe 加载后最终确认 ======
-                if auth_failure_detected[0]:
-                    logger.error(f"[{diagnostic_tag}] iframe 加载阶段检测到 API 401 认证失败！Cookie/Token 已过期。")
-                    logger.error(f"[{diagnostic_tag}] 当前实例将立即停止，不再重试！请手动更新 Cookie。")
-                    page.screenshot(path=os.path.join(screenshot_dir, f"FATAL_oauth401_{diagnostic_tag}.png"))
-                    return
-                # ====================================================
+                # ====== 401 致命错误拦截：仅在页面完全加载后才开始监听 ======
+                # 页面初始化阶段 (goto + 弹窗处理 + iframe加载) 会有大量正常的 401
+                # (alkalimakersuite-pa 等 API 在 token 建立前会返回 401，这是正常行为)
+                # 所以我们只在所有初始化完成后才注册监听器，用于后续的保活阶段
+                auth_401_count = [0]  # 计数器而非布尔值，避免偶发 401 误杀
+                AUTH_401_THRESHOLD = 3  # 连续 3 次以上才判定为真正的认证失败
 
-                # 移除 response 监听器，避免在后续保活阶段重复触发
-                try:
-                    page.remove_listener("response", on_response)
-                except Exception:
-                    pass
+                def on_response_post_init(response):
+                    """页面完全加载后的 API 认证失败监听"""
+                    if response.status == 401 or response.status == 403:
+                        url = response.url
+                        # 只关注真正的 Gemini 推理 API 端点
+                        # 排除初始化相关的 API (alkalimakersuite-pa, firebaseinstallations 等)
+                        if any(api_pattern in url for api_pattern in [
+                            "generativelanguage.googleapis.com",
+                            "alkalimakersuite-pa.clients6.google.com",
+                        ]):
+                            auth_401_count[0] += 1
+                            logger.warning(
+                                f"[{diagnostic_tag}] API 认证失败 ({auth_401_count[0]}/{AUTH_401_THRESHOLD}): "
+                                f"URL: {url[:100]}... 状态码: {response.status}"
+                            )
+
+                page.on("response", on_response_post_init)
+                # ====================================================
 
                 # 5. 所有验证通过，确认成功！
                 logger.info("所有验证通过，确认已成功登录并准备就绪")
                 handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator, expected_path, expected_url)
+
+                # 移除 response 监听器
+                try:
+                    page.remove_listener("response", on_response_post_init)
+                except Exception:
+                    pass
 
                 # 如果运行到这里且没有异常，表示实例正常结束（例如收到关闭信号）
                 # 正常结束时重置重试计数器
