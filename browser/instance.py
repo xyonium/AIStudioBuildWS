@@ -91,16 +91,15 @@ def run_browser_instance(config, shutdown_event=None):
         logger.info(f"已加载现有的环境指纹和 Profile: {profile_dir}")
     else:
         # ====== 新增/修改代码开始 ======
-        # 不要传 screen 参数了，让它自己随机，防止被风控
+        # 显式传入 Screen 对象，固定 screen 尺寸为 1440x900
+        # 防止 Camoufox 反指纹机制用随机 screen 覆盖 CLI 的 -width/-height
+        # （不传 screen 时，生成的 fingerprint.json 中 screen.width/height 是随机的，
+        #  可能为 1680x1050 等，导致窗口尺寸偏大甚至超出 Xvfb 桌面）
         fingerprint_opts = generate_launch_options(
             user_data_dir=profile_dir,
             os="windows",
+            screen=Screen(width=1440, height=900),
         )
-        # 强制 Firefox 启动时最大化或指定宽高
-        # -width 1440 -height 900 是 Firefox 底层的 CLI 参数
-        if "args" not in fingerprint_opts:
-            fingerprint_opts["args"] = []
-        fingerprint_opts["args"].extend(["-width", "1440", "-height", "900"])
         # ====== 新增/修改代码结束 ======
         with open(fingerprint_file, "w") as f:
             json.dump(fingerprint_opts, f, indent=4)
