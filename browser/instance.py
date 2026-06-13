@@ -91,14 +91,16 @@ def run_browser_instance(config, shutdown_event=None):
         logger.info(f"已加载现有的环境指纹和 Profile: {profile_dir}")
     else:
         # ====== 新增/修改代码开始 ======
-        # 显式传入 Screen 对象，固定 screen 尺寸为 1440x900
-        # 防止 Camoufox 反指纹机制用随机 screen 覆盖 CLI 的 -width/-height
-        # （不传 screen 时，生成的 fingerprint.json 中 screen.width/height 是随机的，
-        #  可能为 1680x1050 等，导致窗口尺寸偏大甚至超出 Xvfb 桌面）
+        # 必须显式传入 screen 和 window 参数！
+        # 根因：Docker 中 get_screen_cons() 内部调用 get_monitors() 会静默失败
+        # （需要 xrandr，容器没装），导致 screen=None 传给 BrowserForge，
+        # 其默认 Windows 桌面分布的众数是 1680x1050，每次新生成的指纹都确定性偏大。
+        # screen 约束生成的 screen 尺寸上限，window 精确控制窗口大小。
         fingerprint_opts = generate_launch_options(
             user_data_dir=profile_dir,
             os="windows",
             screen=Screen(max_width=1440, max_height=900),
+            window=(1440, 900),
         )
         # ====== 新增/修改代码结束 ======
         with open(fingerprint_file, "w") as f:
