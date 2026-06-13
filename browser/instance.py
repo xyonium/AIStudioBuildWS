@@ -98,7 +98,7 @@ def run_browser_instance(config, shutdown_event=None):
         fingerprint_opts = generate_launch_options(
             user_data_dir=profile_dir,
             os="windows",
-            screen=Screen(width=1440, height=900),
+            screen=Screen(max_width=1440, max_height=900),
         )
         # ====== 新增/修改代码结束 ======
         with open(fingerprint_file, "w") as f:
