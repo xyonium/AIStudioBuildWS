@@ -267,114 +267,216 @@ def run_browser_instance(config, shutdown_event=None):
 
                 logger.info(f"URL验证通过。目标路径: {mask_path_for_logging(expected_path)}")
 
-                # 2 & 3. 智能等待：边等 Spinner 消失，边侦测并点击真正的弹窗按钮（轮询模式）
-                logger.info("正在进入智能等待：监控加载状态及处理突发弹窗 (最长30秒)...")
-                # 定义要查找的精确按钮名称（优先处理最常见的新版警告）
+                # 2 & 3. 增强版智能等待：弹窗稳定检测 + 最上层交互 + 点击有效性反馈（轮询模式）
+                logger.info("正在进入增强版智能等待：弹窗稳定 + 最上层点击 + 死循环防护 (最长30秒)...")
                 target_button_names = [
-                    "Continue",  # 对应 Unlock more possibilities / 协议更新
-                    "Continue to app",  # 对应 This app is from another developer
+                    "Continue",
+                    "Continue to app",
                     "Continue to the app",
-                    "Connect",  # 对应旧版授权
+                    "Connect",
                     "确认连接", "连接", "继续",
                     "Dismiss", "Got it", "OK", "Accept", "I agree"
                 ]
 
+                # ========== 阶段 1：弹窗稳定期 (Debounce) ==========
+                # 连续检测2秒，确认没有新的弹窗/overlay再冒出来
+                prev_dialog_count = -1
+                stable_ticks = 0
+                DEBOUNCE_GOAL = 2  # 目标：连续2秒弹窗数量不变
+                for _ in range(10):  # 最多等待10秒
+                    curr_count = page.evaluate("""() => {
+                        return document.querySelectorAll(
+                            'mat-mdc-dialog-container, .cdk-overlay-pane, [role="dialog"], ms-g1-welcome-dialog'
+                        ).length;
+                    }""")
+                    if curr_count == prev_dialog_count:
+                        stable_ticks += 1
+                    else:
+                        stable_ticks = 0
+                        prev_dialog_count = curr_count
+                        logger.info(f"  弹窗/遮罩层数量变化: {curr_count}，重置稳定计数")
+                    if stable_ticks >= DEBOUNCE_GOAL:
+                        logger.info(f"  弹窗已稳定（连续{DEBOUNCE_GOAL}秒无变化，当前{prev_dialog_count}层），开始扫描")
+                        break
+                    page.wait_for_timeout(1000)
+                else:
+                    logger.warning("  弹窗稳定期未完全达标，将强制继续...")
+
+                # ========== 阶段 2：每秒重新扫描 + 最上层点击 + 点击有效性检测 ==========
                 wait_time = 0
                 max_wait = 30
-                last_clicked_index = -1  # 轮询指针，记录上次点击的按钮索引
+                # 记录每个按钮的连续无效点击次数，超过3次则跳过
+                click_fail_count = {}  # btn_name -> int
+                # 记录上一轮被判定为"无效"的按钮，下一轮优先尝试其他
+                skip_set = set()
 
                 while wait_time < max_wait:
-                    # 第一步：轮询遍历所有候选按钮，找到第一个真正可点击的
-                    clicked_any = False
-                    found_visible_button = None
+                    # ---- 每轮循环开始：强制重新扫描，不缓存任何定位器 ----
+                    # 先检测最上层弹窗是否变化
+                    top_dialog_info = page.evaluate("""() => {
+                        const dialogs = Array.from(document.querySelectorAll(
+                            'mat-mdc-dialog-container, .cdk-overlay-pane, [role="dialog"], ms-g1-welcome-dialog'
+                        )).filter(el => {
+                            const rect = el.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0;
+                        });
+                        if (dialogs.length === 0) return null;
+                        const top = dialogs[dialogs.length - 1];
+                        return {
+                            tag: top.tagName,
+                            class: top.className,
+                            id: top.id,
+                            hasContinue: !!top.querySelector('button, [role="button"]'),
+                        };
+                    }""")
 
-                    for idx, btn_name in enumerate(target_button_names):
+                    clicked_any = False
+                    candidate_found = None
+
+                    # 遍历所有候选按钮，但优先尝试非 skip_set 中的
+                    search_order = [b for b in target_button_names if b not in skip_set] + \
+                                   [b for b in target_button_names if b in skip_set]
+
+                    for btn_name in search_order:
+                        # 如果该按钮已连续无效点击3次，本轮跳过
+                        if click_fail_count.get(btn_name, 0) >= 3:
+                            continue
+
                         try:
-                            # 策略1：使用 get_by_role（最贴近人类行为）
+                            # 策略1: get_by_role (标准 button)
                             btn = page.get_by_role("button", name=btn_name, exact=True)
-                            if btn.count() > 0 and btn.first.is_visible(timeout=100):
-                                # 额外检查：确保按钮在视口内且未被禁用
-                                box = btn.first.bounding_box()
-                                if box and box['width'] > 0 and box['height'] > 0:
-                                    found_visible_button = ("role", btn_name, btn.first, idx)
+                            count = btn.count()
+                            if count > 0:
+                                # 遍历所有匹配项，找出最上层的那个
+                                for nth in range(count):
+                                    handle = btn.nth(nth)
+                                    if not handle.is_visible(timeout=100):
+                                        continue
+                                    box = handle.bounding_box()
+                                    if not box or box['width'] <= 0 or box['height'] <= 0:
+                                        continue
+                                    # 命中测试：检查中心点是否被该元素占据
+                                    cx = box['x'] + box['width'] / 2
+                                    cy = box['y'] + box['height'] / 2
+                                    # 直接把 ElementHandle 传进 JS，避免用浏览器不支持的 :has-text 重新查询
+                                    is_on_top = page.evaluate("""({element, x, y}) => {
+                                        if (!element) return false;
+                                        const top = document.elementFromPoint(x, y);
+                                        return top === element || element.contains(top);
+                                    }""", {"element": handle.element_handle(), "x": cx, "y": cy})
+                                    if is_on_top:
+                                        candidate_found = ("role", btn_name, handle, nth)
+                                        break
+                                if candidate_found:
                                     break
 
-                            # 策略2：兜底方案 - 直接文本匹配（处理非标准 button 元素）
-                            # 匹配 button、div[role="button"]、span[role="button"] 等
+                            # 策略2: 文本底平 (非标准 button，如 div[role="button"])
                             text_btn = page.locator(
-                                f"button:has-text('{btn_name}'), "
-                                f"[role='button']:has-text('{btn_name}'), "
-                                f"button:text-is('{btn_name}')"
+                                f'button:has-text("{btn_name}"), '
+                                f'[role="button"]:has-text("{btn_name}"), '
+                                f'button:text-is("{btn_name}")'
                             )
-                            if text_btn.count() > 0 and text_btn.first.is_visible(timeout=100):
-                                box = text_btn.first.bounding_box()
-                                if box and box['width'] > 0 and box['height'] > 0:
-                                    found_visible_button = ("text", btn_name, text_btn.first, idx)
+                            count = text_btn.count()
+                            if count > 0:
+                                for nth in range(count):
+                                    handle = text_btn.nth(nth)
+                                    if not handle.is_visible(timeout=100):
+                                        continue
+                                    box = handle.bounding_box()
+                                    if not box or box['width'] <= 0 or box['height'] <= 0:
+                                        continue
+                                    # 命中测试
+                                    cx = box['x'] + box['width'] / 2
+                                    cy = box['y'] + box['height'] / 2
+                                    # 使用 JS 获取实际元素判断（btn_name 通过 dict 传入，Playwright 只接受单个 arg）
+                                    is_on_top = page.evaluate("""({x, y, btnName}) => {
+                                        const top = document.elementFromPoint(x, y);
+                                        if (!top) return false;
+                                        // 向上遍历，看是否在按钮元素内
+                                        let el = top;
+                                        while (el) {
+                                            if (el.getAttribute('role') === 'button' || el.tagName === 'BUTTON') {
+                                                return el.textContent.trim().includes(btnName);
+                                            }
+                                            el = el.parentElement;
+                                        }
+                                        return false;
+                                    }""", {"x": cx, "y": cy, "btnName": btn_name})
+                                    if is_on_top:
+                                        candidate_found = ("text", btn_name, handle, nth)
+                                        break
+                                if candidate_found:
                                     break
 
                         except Exception:
-                            continue  # 找不到这个按钮或报错，静默尝试下一个名字
+                            continue
 
-                    if found_visible_button:
-                        strategy, btn_name, btn_locator, idx = found_visible_button
-                        logger.info(f"发现可见按钮 [{btn_name}]（策略: {strategy}），尝试点击...")
+                    if candidate_found:
+                        strategy, btn_name, btn_handle, nth = candidate_found
+                        logger.info(f"发现可见按钮 [{btn_name}] (策略: {strategy}, 第{nth}个，已通过命中测试)")
 
+                        # 执行点击
+                        click_success = False
                         try:
-                            # 尝试多种点击策略
-                            click_success = False
-
-                            # 策略A：标准点击 + force=True
+                            btn_handle.click(force=True, timeout=2000)
+                            click_success = True
+                        except Exception as e1:
+                            logger.debug(f"标准点击失败: {e1}")
                             try:
-                                btn_locator.click(force=True, timeout=2000)
+                                page.evaluate("(el) => { if(el) el.click(); }", btn_handle.element_handle())
                                 click_success = True
-                            except Exception as e1:
-                                logger.debug(f"标准点击失败: {e1}")
+                            except Exception as e2:
+                                logger.debug(f"JS 点击也失败: {e2}")
 
-                            # 策略B：JavaScript 直接触发 click 事件（绕过所有遮挡检测）
-                            if not click_success:
-                                try:
-                                    page.evaluate("""
-                                        (element) => {
-                                            if (element) {
-                                                element.click();
-                                                return true;
-                                            }
-                                            return false;
-                                        }
-                                    """, btn_locator.element_handle())
-                                    click_success = True
-                                except Exception as e2:
-                                    logger.debug(f"JavaScript 点击失败: {e2}")
+                        if click_success:
+                            logger.info(f"成功点击按钮 [{btn_name}]")
+                            page.wait_for_timeout(1500)
 
-                            if click_success:
-                                logger.info(f"成功点击按钮 [{btn_name}]")
-                                clicked_any = True
-                                last_clicked_index = idx
-                                page.wait_for_timeout(1500)  # 点击后给予 1.5 秒让弹窗动画消失
+                            # ---- 点击有效性检测：看是否解决了问题 ----
+                            # 检查该按钮是否还在页面上（如果是弹窗内的按钮，弹窗关闭后就会消失）
+                            try:
+                                still_visible = btn_handle.is_visible(timeout=500)
+                            except Exception:
+                                still_visible = False
 
-                        except Exception as click_e:
-                            logger.warning(f"点击按钮 [{btn_name}] 时出错: {click_e}")
+                            if still_visible:
+                                # 点击了但按钮还在，可能是被遮挡/无效点击
+                                click_fail_count[btn_name] = click_fail_count.get(btn_name, 0) + 1
+                                logger.warning(
+                                    f"点击按钮 [{btn_name}] 后按钮仍然可见 (无效次数: {click_fail_count[btn_name]}/3)"
+                                )
+                                if click_fail_count[btn_name] >= 3:
+                                    logger.warning(f"  按钮 [{btn_name}] 连续3次无效，加入跳过列表，下一轮尝试其他按钮")
+                                    skip_set.add(btn_name)
+                                # 点击后给予短暂休息，但不立即 continue，让 spinner 检查有机会跳出
+                            else:
+                                # 点击有效，按钮消失了
+                                logger.info(f"  按钮 [{btn_name}] 消失，点击有效，重置其失败计数")
+                                click_fail_count[btn_name] = 0
+                                if btn_name in skip_set:
+                                    skip_set.remove(btn_name)
 
-                    if clicked_any:
-                        continue  # 如果刚才发生了点击，立刻进入下一轮 while 循环，因为可能还有连环弹窗
+                            clicked_any = True
+                            # 点击后立即进入下一轮循环（检查 spinner 或新弹窗）
+                            continue
 
-                    # 第二步：如果一圈下来没发现弹窗，我们来检查加载圈是否都消失了
-                    try:
-                        spinners = page.locator('mat-spinner')
-                        count = spinners.count()
-                        all_hidden = True
-                        if count > 0:
-                            for i in range(count):
-                                if spinners.nth(i).is_visible():
-                                    all_hidden = False
-                                    break
-                        if all_hidden:
-                            logger.info("所有加载指示器已消失。页面已完成初步加载且无拦截弹窗。")
-                            break  # 没有任何弹窗，且圈圈消失，大功告成，跳出 while 循环
-                    except Exception:
-                        pass  # DOM变化导致获取元素报错，忽略
+                    # ---- 如果没有发现任何弹窗按钮，检查 spinner 是否都消失 ----
+                    if not clicked_any:
+                        try:
+                            spinners = page.locator('mat-spinner')
+                            count = spinners.count()
+                            all_hidden = True
+                            if count > 0:
+                                for i in range(count):
+                                    if spinners.nth(i).is_visible():
+                                        all_hidden = False
+                                        break
+                            if all_hidden:
+                                logger.info("所有加载指示器已消失。页面已完成初步加载且无拦截弹窗。")
+                                break
+                        except Exception:
+                            pass
 
-                    # 休息 1 秒后进行下一秒的轮询探测
                     page.wait_for_timeout(1000)
                     wait_time += 1
 
