@@ -115,13 +115,36 @@ def run_browser_instance(config, shutdown_event=None):
     # [新增] 强制 Firefox 禁用后台资源冻结、标签页休眠和遮挡跟踪 (Occlusion Tracking)
     # 这对多窗口/多标签页在无头环境下能否持续运行至关重要
     launch_options["firefox_user_prefs"] = {
-        "browser.tabs.unloadOnLowMemory": False,  # 禁用低内存卸载
-        "dom.min_background_timeout_value": 4,  # 维持后台计时器频率
+        #"browser.tabs.unloadOnLowMemory": False,  # 禁用低内存卸载
+        "dom.min_background_timeout_value": 100,  # 维持后台计时器频率
         "network.websocket.timeout": 0,  # 禁用WS超时
         "page_visibility.dont_suspend_inactive": True,  # 防止非活动页面挂起
         "dom.timeout.enable_budget_timer_fallback": False,
         "widget.windows.window_occlusion_tracking.enabled": False,  # 禁用遮挡跟踪（如果窗口被遮挡，原本会挂起渲染）
-        "gfx.webrender.dcomp-win.enabled": False  # 关闭可能导致黑屏或不渲染的硬件加速遮挡
+        "gfx.webrender.dcomp-win.enabled": False,  # 关闭可能导致黑屏或不渲染的硬件加速遮挡        
+        # 1. 禁用或极大限制内存缓存 (Memory Cache)
+        # 默认下浏览器会把图片、脚本等放在内存供快速重载。自动化环境下不需要。
+        "browser.cache.memory.enable": False,
+        #"browser.cache.disk.enable": False,       # 甚至可以禁止磁盘缓存，防止磁盘I/O导致延迟
+        # 2. 砍掉页面历史记录 (Session History)
+        # 非常关键！默认浏览器会记住50个页面的状态(为了按后退键能够秒开)，极其占内存
+        "browser.sessionhistory.max_entries": 2,  # 仅保留2个前进后退记录
+        "browser.sessionstore.max_tabs_undo": 0,  # 关闭"恢复关闭的标签页"功能
+        # 3. 强制激进的垃圾回收 (Garbage Collection & JS Memory)
+        "javascript.options.mem.max": 102400,     # 限制 JS 引擎最大使用内存阈值 (单位KB)
+        "javascript.options.mem.high_water_mark": 32, # 更低的水位线，更早触发GC
+        # 4. 优化图片与媒体内存消耗（如果你不需要看高清图片）
+        "image.mem.decodeondraw": True,           # 只有真正画出来的时候才解码图片
+        "image.mem.discardable": True,            # 允许释放掉未显示的图片内存
+        "image.mem.max_decoded_image_kb": 10240,  # 限制单张解码图片的最大内存 (10MB)
+        # 5. 严格限制子进程数量（防止它悄悄开多个辅助进程）
+        "dom.ipc.processCount": 1,                # 强制将网页内容进程数量限制在1个
+        "dom.ipc.processCount.extension": 1,      # 限制插件进程数
+        # 6. 禁用不需要的遥测和后台服务 (有效减少闲置内存占用)
+        "toolkit.telemetry.enabled": False,
+        "browser.ping-centre.telemetry": False,
+        "network.prefetch-next": False,           # 禁用链接预读取
+        "network.dns.disablePrefetch": True      # 禁用 DNS 预解析
     }
 
     # =========================================================================
