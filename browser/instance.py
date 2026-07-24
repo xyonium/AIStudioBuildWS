@@ -121,7 +121,7 @@ def run_browser_instance(config, shutdown_event=None):
         "page_visibility.dont_suspend_inactive": True,  # 防止非活动页面挂起
         "dom.timeout.enable_budget_timer_fallback": False,
         "widget.windows.window_occlusion_tracking.enabled": False,  # 禁用遮挡跟踪（如果窗口被遮挡，原本会挂起渲染）
-        "gfx.webrender.dcomp-win.enabled": False,  # 关闭可能导致黑屏或不渲染的硬件加速遮挡        
+        #"gfx.webrender.dcomp-win.enabled": False,  # 关闭可能导致黑屏或不渲染的硬件加速遮挡        
         # 1. 禁用或极大限制内存缓存 (Memory Cache)
         # 默认下浏览器会把图片、脚本等放在内存供快速重载。自动化环境下不需要。
         "browser.cache.memory.enable": False,
@@ -144,7 +144,10 @@ def run_browser_instance(config, shutdown_event=None):
         "toolkit.telemetry.enabled": False,
         "browser.ping-centre.telemetry": False,
         "network.prefetch-next": False,           # 禁用链接预读取
-        "network.dns.disablePrefetch": True      # 禁用 DNS 预解析
+        "network.dns.disablePrefetch": True,      # 禁用 DNS 预解析
+        # === [新增] 媒体与动图封杀 ===
+        "media.autoplay.default": 5,
+        "image.animation_mode": "none"
     }
 
     # =========================================================================
