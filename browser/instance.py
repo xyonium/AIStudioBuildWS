@@ -544,15 +544,14 @@ def run_browser_instance(config, shutdown_event=None):
                 AUTH_401_THRESHOLD = 5  # 连续 5 次判定为会话断裂，触发刷新自愈
 
                 def on_response_post_init(response):
-                    """页面完全加载后的 API 认证失败监听"""
-                    if response.status == 401 or response.status == 403:
-                        url = response.url
-                        # 只关注真正的 Gemini 推理 API 端点
-                        # 排除初始化相关的 API (alkalimakersuite-pa, firebaseinstallations 等)
-                        if any(api_pattern in url for api_pattern in [
-                            "generativelanguage.googleapis.com",
-                            "alkalimakersuite-pa.clients6.google.com",
-                        ]):
+                    """页面完全加载后的 API 认证失败/成功监听"""
+                    url = response.url
+                    # 只关注真正的 Gemini 推理 API 端点
+                    if any(api_pattern in url for api_pattern in [
+                        "generativelanguage.googleapis.com",
+                        "alkalimakersuite-pa.clients6.google.com",
+                    ]):
+                        if response.status == 401 or response.status == 403:
                             auth_401_count[0] += 1
                             logger.warning(
                                 f"[{diagnostic_tag}] API 认证失败 ({auth_401_count[0]}/{AUTH_401_THRESHOLD}): "
@@ -566,6 +565,11 @@ def run_browser_instance(config, shutdown_event=None):
                                     f"[{diagnostic_tag}] 连续 {AUTH_401_THRESHOLD} 次 API 认证失败，"
                                     f"等待保活循环重建会话"
                                 )
+                        elif 200 <= response.status < 300:
+                            # 成功的 API call 清零连续失败计数器
+                            if auth_401_count[0] > 0:
+                                logger.info(f"[{diagnostic_tag}] API 请求成功 ({response.status})，重置 API 认证失败计数器")
+                                auth_401_count[0] = 0
 
                 page.on("response", on_response_post_init)
                 # ====================================================
@@ -586,6 +590,26 @@ def run_browser_instance(config, shutdown_event=None):
                 return
 
         except KeepAliveError as e:
+            # 如果是 API 连续认证失败引发的重启，自动清理损坏的 Profile 缓存
+            # 注意：保留 fingerprint.json 保持指纹一致，只清理 session/cookies 缓存
+            if "API 连续认证失败" in str(e):
+                logger.warning(f"检测到 [{diagnostic_tag}] 凭证已失效，准备自动清空 Profile 缓存以重新初始化...")
+                try:
+                    import shutil
+                    for item in os.listdir(profile_dir):
+                        if item != "fingerprint.json":
+                            item_path = os.path.join(profile_dir, item)
+                            if os.path.isdir(item_path):
+                                shutil.rmtree(item_path, ignore_errors=True)
+                            else:
+                                try:
+                                    os.remove(item_path)
+                                except Exception:
+                                    pass
+                    logger.info(f"成功清理 [{diagnostic_tag}] Profile 缓存 (指纹特征已保留)")
+                except Exception as clean_e:
+                    logger.error(f"清理 [{diagnostic_tag}] Profile 缓存失败: {clean_e}")
+
             retry_count += 1
             if retry_count > max_retries:
                 logger.error(f"重试次数已达上限 ({max_retries})，实例不再重启，退出")
