@@ -146,9 +146,9 @@ def run_browser_instance(config, shutdown_event=None):
         "browser.ping-centre.telemetry": False,
         "network.prefetch-next": False,           # 禁用链接预读取
         "network.dns.disablePrefetch": True,      # 禁用 DNS 预解析
-        # === [新增] 媒体与动图封杀 ===
-        "media.autoplay.default": 5,
-        "image.animation_mode": "none"
+        # 已回退：media.autoplay.default=5 和 image.animation_mode=none
+        # 这两条会让浏览器媒体/动图行为偏离真实用户，Google 反爬的行为指纹
+        # 一致性校验可能因此判 403，而 AI Studio 页面并无自动播放媒体，收益≈0
     }
 
     # =========================================================================
