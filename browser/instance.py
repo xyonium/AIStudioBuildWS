@@ -122,9 +122,10 @@ def run_browser_instance(config, shutdown_event=None):
         "dom.timeout.enable_budget_timer_fallback": False,
         "widget.windows.window_occlusion_tracking.enabled": False,  # 禁用遮挡跟踪（如果窗口被遮挡，原本会挂起渲染）
         #"gfx.webrender.dcomp-win.enabled": False,  # 关闭可能导致黑屏或不渲染的硬件加速遮挡        
-        # 1. 禁用或极大限制内存缓存 (Memory Cache)
-        # 默认下浏览器会把图片、脚本等放在内存供快速重载。自动化环境下不需要。
-        "browser.cache.memory.enable": False,
+        # 1. 限制内存缓存容量（而非禁用）
+        # 禁用 browser.cache.memory 会同时关掉 Firefox 的 memory-pressure 回收机制，
+        # 反而导致 GC 变懒、RSS 只增不还；保留缓存但限制容量更稳
+        "browser.cache.memory.capacity": 65536,  # 内存缓存上限 64MB
         #"browser.cache.disk.enable": False,       # 甚至可以禁止磁盘缓存，防止磁盘I/O导致延迟
         # 2. 砍掉页面历史记录 (Session History)
         # 非常关键！默认浏览器会记住50个页面的状态(为了按后退键能够秒开)，极其占内存
@@ -171,9 +172,11 @@ def run_browser_instance(config, shutdown_event=None):
 
             # 【安全修复】只清理属于当前 profile 的孤儿进程，避免误杀其他用户实例
             # camoufox 启动命令中包含 -profile /app/camoufox_profiles/USER_COOKIE_X
+            # 注意：正则必须精确匹配完整目录名，否则 USER_COOKIE_1 会误杀
+            # USER_COOKIE_10/11（前缀匹配），引发多账户级联重启和 403
             escaped_profile_dir = profile_dir.replace("/", "\\/")
             subprocess.run(
-                f"pkill -f 'camoufox-bin.*-profile.*{escaped_profile_dir}' || true",
+                f"pkill -f 'camoufox-bin.*-profile {escaped_profile_dir}( |$)' || true",
                 shell=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
@@ -538,7 +541,7 @@ def run_browser_instance(config, shutdown_event=None):
                 # (alkalimakersuite-pa 等 API 在 token 建立前会返回 401，这是正常行为)
                 # 所以我们只在所有初始化完成后才注册监听器，用于后续的保活阶段
                 auth_401_count = [0]  # 计数器而非布尔值，避免偶发 401 误杀
-                AUTH_401_THRESHOLD = 3  # 连续 3 次以上才判定为真正的认证失败
+                AUTH_401_THRESHOLD = 5  # 连续 5 次判定为会话断裂，触发刷新自愈
 
                 def on_response_post_init(response):
                     """页面完全加载后的 API 认证失败监听"""
@@ -555,13 +558,21 @@ def run_browser_instance(config, shutdown_event=None):
                                 f"[{diagnostic_tag}] API 认证失败 ({auth_401_count[0]}/{AUTH_401_THRESHOLD}): "
                                 f"URL: {url[:100]}... 状态码: {response.status}"
                             )
+                            if auth_401_count[0] >= AUTH_401_THRESHOLD:
+                                # 不在回调里抛异常（Playwright 事件回调的异常不会传播到主循环），
+                                # 仅打日志；由 handle_successful_navigation 的保活循环轮询
+                                # auth_401_count 并抛 KeepAliveError 重启自愈
+                                logger.error(
+                                    f"[{diagnostic_tag}] 连续 {AUTH_401_THRESHOLD} 次 API 认证失败，"
+                                    f"等待保活循环重建会话"
+                                )
 
                 page.on("response", on_response_post_init)
                 # ====================================================
 
                 # 5. 所有验证通过，确认成功！
                 logger.info("所有验证通过，确认已成功登录并准备就绪")
-                handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator, expected_path, expected_url)
+                handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator, expected_path, expected_url, auth_401_count, AUTH_401_THRESHOLD)
 
                 # 移除 response 监听器
                 try:

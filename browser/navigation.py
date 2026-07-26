@@ -1,5 +1,6 @@
 import time
 import os
+from datetime import datetime, timezone, timedelta
 from playwright.sync_api import Page, expect
 from utils.paths import logs_dir
 from utils.common import ensure_dir
@@ -7,6 +8,40 @@ from browser.ws_helper import reconnect_ws, get_ws_status, dismiss_interaction_m
 
 class KeepAliveError(Exception):
     pass
+
+
+def _daily_restart_due(last_restart_ts: float, stagger_key: str = "") -> bool:
+    """
+    检查是否到达每日定时重启时间（用于回收长跑浏览器的内存）。
+
+    时间由环境变量 DAILY_RESTART_TIME 配置（默认 "03:33"），
+    时区沿用日志的 TZ_OFFSET（默认 UTC+8）。
+    为避免多账户同一秒集中重启导致 CPU 峰值，按实例名做确定性抖动，
+    在配置时间后 0~10 分钟内错开。
+    """
+    restart_at = os.getenv("DAILY_RESTART_TIME", "03:33")
+    try:
+        hh, mm = (int(x) for x in restart_at.split(":"))
+    except (ValueError, TypeError):
+        hh, mm = 3, 33
+
+    try:
+        offset = float(os.getenv("TZ_OFFSET", 8))
+    except (ValueError, TypeError):
+        offset = 8
+    tz = timezone(timedelta(hours=offset))
+
+    # 每个实例确定性错开 0~600 秒，避免多账户同时重启
+    # 用 crc32 而非 hash()：hash() 受 PYTHONHASHSEED 影响，多进程下每次启动结果不同
+    if stagger_key:
+        import zlib
+        jitter = zlib.crc32(stagger_key.encode()) % 600
+    else:
+        jitter = 0
+
+    now = datetime.now(tz)
+    slot = now.replace(hour=hh, minute=mm, second=0, microsecond=0) + timedelta(seconds=jitter)
+    return now >= slot and last_restart_ts < slot.timestamp()
 
 def handle_popup_dialog(page: Page, logger=None):
     """
@@ -58,7 +93,7 @@ def handle_popup_dialog(page: Page, logger=None):
     except Exception as e:
         logger.info(f"检查弹窗时发生意外：{e}，将继续执行...")
 
-def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdown_event=None, cookie_validator=None, expected_path=None, expected_url=None):
+def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdown_event=None, cookie_validator=None, expected_path=None, expected_url=None, auth_failure_count=None, auth_failure_threshold=5):
     """
     在成功导航到目标页面后，执行后续操作（处理弹窗、保持运行）。
     """
@@ -100,6 +135,9 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
     last_ws_status = get_ws_status(page, logger)
     logger.info(f"初始WS状态: {last_ws_status}")
 
+    # 每日定时重启基线：本次会话的启动时间
+    last_restart_ts = time.time()
+
     # 添加Cookie验证计数器
     click_counter = 0
 
@@ -108,6 +146,24 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
         if shutdown_event and shutdown_event.is_set():
             logger.info("收到关闭信号，正在优雅退出保持活动循环...")
             break
+
+        # 每日定时内存回收：到达配置时间（默认 UTC+8 03:33）后主动重启实例，
+        # 由外层 KeepAliveError 循环重建浏览器，释放长跑累积的内存
+        if _daily_restart_due(last_restart_ts, cookie_file_config):
+            logger.info(
+                f"到达每日重启时间 ({os.getenv('DAILY_RESTART_TIME', '03:33')} UTC+{os.getenv('TZ_OFFSET', '8')})，"
+                f"主动重启实例以回收内存"
+            )
+            raise KeepAliveError("每日定时内存回收重启")
+
+        # API 认证连续失败自愈：页面登录态正常但后端会话已断（如多账户级联重启
+        # 打断 token 建立），表现为持续性 401/403，重启浏览器实例重建会话
+        if auth_failure_count is not None and auth_failure_count[0] >= auth_failure_threshold:
+            logger.error(
+                f"API 连续认证失败已达阈值 ({auth_failure_count[0]}/{auth_failure_threshold})，"
+                f"重启浏览器实例重建会话"
+            )
+            raise KeepAliveError("API 连续认证失败，重建会话")
 
         try:
             # 强制页面唤醒以防由于遮挡被引擎休眠 (Occlusion sleep)
