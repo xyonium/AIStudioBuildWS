@@ -541,7 +541,7 @@ def run_browser_instance(config, shutdown_event=None):
                 # (alkalimakersuite-pa 等 API 在 token 建立前会返回 401，这是正常行为)
                 # 所以我们只在所有初始化完成后才注册监听器，用于后续的保活阶段
                 auth_401_count = [0]  # 计数器而非布尔值，避免偶发 401 误杀
-                AUTH_401_THRESHOLD = 5  # 连续 5 次判定为会话断裂，触发刷新自愈
+                AUTH_401_THRESHOLD = int(os.getenv("AUTH_FAILURE_THRESHOLD", "5"))  # 连续认证失败阈值（默认5次，可环境变量调整）
 
                 def on_response_post_init(response):
                     """页面完全加载后的 API 认证失败/成功监听"""
