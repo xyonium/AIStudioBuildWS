@@ -15,6 +15,7 @@ from utils.common import parse_headless_mode, ensure_dir
 from utils.url_helper import extract_url_path, mask_url_for_logging, mask_path_for_logging
 from camoufox.utils import launch_options as generate_launch_options
 from browserforge.fingerprints import Screen
+from browser.window_placer import place_window
 
 
 def run_browser_instance(config, shutdown_event=None):
@@ -192,6 +193,14 @@ def run_browser_instance(config, shutdown_event=None):
             with Camoufox(**launch_options) as context:
                 # 获取持久化上下文中已有的默认页面，如果没有则新建
                 page = context.pages[0] if context.pages else context.new_page()
+
+                # 防止窗口被其他实例 100% 盖死（会触发 Firefox occlusion sleep）。
+                # 根因：persistent profile 的 xulstore.json 会让 Firefox 带着
+                # _NET_CURRENT_DESKTOP 标记复活窗口，fluxbox 的 CascadePlacement
+                # 对这类窗口直接跳过摆放，所以重启后窗口会全叠在上次的位置。
+                # 仅在检测到页面区域被完全遮挡时才挪到本实例的确定性槽位；
+                # 无 wmctrl 的环境（本地开发）会优雅跳过，不影响流程。
+                place_window(diagnostic_tag, logger)
 
                 # 依然兼容你现有的环境变量/JSON导入逻辑（当作初始凭证注入）
                 if cookies:
