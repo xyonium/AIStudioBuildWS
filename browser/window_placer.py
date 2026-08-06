@@ -8,9 +8,15 @@ import zlib
 _SCREEN_W = 1920
 _SCREEN_H = 1080
 
-# 浏览器外窗尺寸（与 instance.py 生成指纹时的 window=(1440,900) 保持一致）
-_WIN_W = 1440
-_WIN_H = 900
+# 浏览器外窗实际尺寸（含标题栏）。
+# 注意：指纹里自报的 1440x900 只是伪装值，Camoufox 真实外窗是 1280x772，
+# 从运行中的容器 wmctrl -l -G 实测得到。布局必须按真实尺寸算，否则会误判遮挡。
+_WIN_W = 1280
+_WIN_H = 772
+
+# 匹配浏览器主窗口标题的片段（Camoufox 的标题后缀是 "— Camoufox"，
+# 普通 Firefox 是 "— Mozilla Firefox"，两者都兼容）。
+_TITLE_HINTS = ("— Camoufox", "— Mozilla Firefox")
 
 
 def _cascade_step() -> tuple:
@@ -33,6 +39,23 @@ def _cascade_step() -> tuple:
     step_x = max(1, min(step_x, _SCREEN_W - _WIN_W - margin_x))
     step_y = max(1, min(step_y, _SCREEN_H - _WIN_H - margin_y))
     return step_x, step_y
+
+
+def _slot_position(slot: int, step_x: int, step_y: int,
+                   win_w: int, win_h: int) -> tuple:
+    """
+    槽位 -> 屏幕坐标。沿对角线铺开，到达右/下边界后折回并留 30px 页边，
+    保证任何槽位的页面区域都不会被其它槽位 100% 盖死。
+    """
+    max_x = max(_SCREEN_W - win_w, 0)
+    max_y = max(_SCREEN_H - win_h, 0)
+    x = slot * step_x
+    y = slot * step_y
+    if x > max_x:
+        x = max_x - (x - max_x) % 60  # 从右缘向左折回
+    if y > max_y:
+        y = max_y - (y - max_y) % 60  # 从下缘向上折回
+    return max(0, x), max(0, y)
 
 
 def slot_for(source_name: str, max_slots: int = 10) -> int:
@@ -82,13 +105,17 @@ def _screen_point_occluded(px: int, py: int, exclude_win_id: str = None) -> bool
 
 
 def _move_and_verify(win_id: str, x: int, y: int) -> bool:
-    """移动窗口并确认它真的到了目标位置（fluxbox 可能夹取）。"""
+    """
+    移动窗口并确认它真的到了目标位置附近。
+    fluxbox 有边框吸附（edge snapping），会把窗口吸到屏幕/窗口边缘，
+    所以容差放到 40px：只要不是完全没动，就认为归位成功。
+    """
     try:
         subprocess.run(
             ["wmctrl", "-i", "-r", win_id, "-e", f"0,{x},{y},-1,-1"],
             capture_output=True, timeout=10,
         )
-        time.sleep(0.3)
+        time.sleep(0.5)
         out = subprocess.run(
             ["wmctrl", "-l", "-G"], capture_output=True, text=True, timeout=10
         ).stdout
@@ -97,8 +124,7 @@ def _move_and_verify(win_id: str, x: int, y: int) -> bool:
             if len(parts) < 8 or parts[0] != win_id:
                 continue
             wx, wy = int(parts[2]), int(parts[3])
-            # 允许 fluxbox 夹几像素
-            return abs(wx - x) <= 8 and abs(wy - y) <= 8
+            return abs(wx - x) <= 40 and abs(wy - y) <= 40
     except Exception:
         pass
     return False
@@ -147,8 +173,6 @@ def place_window(source_name: str, logger, browser_pid=None,
     """
     slot = slot_for(source_name)
     step_x, step_y = _cascade_step()
-    max_x = max(_SCREEN_W - win_w, 0)
-    max_y = max(_SCREEN_H - win_h, 0)
 
     for attempt in range(attempts):
         try:
@@ -163,8 +187,8 @@ def place_window(source_name: str, logger, browser_pid=None,
                     continue
                 wid, _desktop, pid, _host, title = parts
                 # 只匹配本实例的浏览器主窗口（有标题栏的顶层窗口），
-                # 排除 "Camoufox"/"Mozilla Firefox" 这类无标题辅助窗口
-                if " — Mozilla Firefox" not in title:
+                # 排除无标题的辅助/隐藏窗口
+                if not any(hint in title for hint in _TITLE_HINTS):
                     continue
                 # 拿到了 browser_pid 就精确匹配；没拿到就兜底匹配唯一候选
                 if browser_pid is not None and int(pid) != browser_pid:
@@ -199,9 +223,8 @@ def place_window(source_name: str, logger, browser_pid=None,
                 logger.debug(f"窗口未被完全遮挡，保持当前位置 ({wx}, {wy})")
                 return True
 
-            # 被盖死了：挪到本实例的确定性槽位
-            x = min(slot * step_x, max_x)
-            y = min(slot * step_y, max_y)
+            # 被盖死了：挪到本实例的确定性槽位（沿对角线铺开、边界折回）
+            x, y = _slot_position(slot, step_x, step_y, win_w, win_h)
             if _move_and_verify(win_id, x, y):
                 logger.info(f"窗口从被完全遮挡处挪到槽位 {slot}: ({x}, {y})")
                 return True
