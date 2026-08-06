@@ -41,10 +41,22 @@ def _cascade_step() -> tuple:
     return step_x, step_y
 
 
+def slot_for(source_name: str, max_slots: int = 10) -> int:
+    """
+    从实例名（USER_COOKIE_12 / xxx.json）提取末尾序号作为布局槽位。
+    没有序号的来源按名字 crc32 映射。槽位即 (x=slot*STEP_X, y=slot*STEP_Y)，
+    与启动顺序无关，每个实例每次重启都回到同一个固定位置。
+    """
+    m = re.search(r'(\d+)', source_name)
+    if m:
+        return (int(m.group(1)) - 1) % max_slots
+    return zlib.crc32(source_name.encode()) % max_slots
+
+
 def _slot_position(slot: int, step_x: int, step_y: int,
                    win_w: int, win_h: int) -> tuple:
     """
-    槽位 -> 屏幕坐标。沿对角线铺开，到达右/下边界后折回并留 30px 页边，
+    槽位 -> 屏幕坐标。沿对角线铺开，到达右/下边界后折回并留页边，
     保证任何槽位的页面区域都不会被其它槽位 100% 盖死。
     """
     max_x = max(_SCREEN_W - win_w, 0)
@@ -58,177 +70,143 @@ def _slot_position(slot: int, step_x: int, step_y: int,
     return max(0, x), max(0, y)
 
 
-def slot_for(source_name: str, max_slots: int = 10) -> int:
-    """
-    从实例名（USER_COOKIE_12 / xxx.json）提取末尾序号作为布局槽位。
-    没有序号的来源按名字 crc32 映射。槽位即 (x=slot*STEP_X, y=slot*STEP_Y)，
-    与启动顺序无关，每个实例每次重启都回到同一个固定位置。
-    """
-    m = re.search(r'(\d+)', source_name)
-    if m:
-        return (int(m.group(1)) - 1) % max_slots
-    return zlib.crc32(source_name.encode()) % max_slots
+def _run(cmd, timeout=10):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
 
 
-def _screen_point_occluded(px: int, py: int, exclude_win_id: str = None) -> bool:
+def _pid_matches_profile(pid: str, source_name: str) -> bool:
     """
-    用 xdotool 查屏幕上 (px, py) 这一点的最顶层窗口。
-    返回 True 表示被别的窗口盖住，False 表示是本窗口或桌面。
+    判断窗口所属进程是不是本实例：读 /proc/<pid>/cmdline，
+    匹配 camoufox 启动参数里的 -profile .../<source_name>。
+    source_name 即 profile 目录名（USER_COOKIE_N 或 json 文件名）。
+    用路径结尾边界匹配，避免 USER_COOKIE_1 误配 USER_COOKIE_10。
     """
     try:
-        out = subprocess.run(
-            ["xdotool", "getmouselocation", "--shell"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout
-        cur = dict(
-            line.split("=", 1) for line in out.strip().splitlines() if "=" in line
-        )
-        # 临时把鼠标挪到目标点取窗口栈（不影响浏览器逻辑）
-        subprocess.run(["xdotool", "mousemove", str(px), str(py)],
-                       capture_output=True, timeout=5)
-        out = subprocess.run(
-            ["xdotool", "getmouselocation", "--shell"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout
-        loc = dict(
-            line.split("=", 1) for line in out.strip().splitlines() if "=" in line
-        )
-        # 还原鼠标位置
-        subprocess.run(
-            ["xdotool", "mousemove", cur.get("X", "0"), cur.get("Y", "0")],
-            capture_output=True, timeout=5,
-        )
-        top_win = loc.get("WINDOW", "")
-        return bool(top_win) and top_win != str(exclude_win_id)
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\0", b" ").decode("utf-8", "ignore")
+        return re.search(
+            r'-profile\s+\S*camoufox_profiles/' + re.escape(source_name) + r'(?:\s|$)',
+            cmdline,
+        ) is not None
     except Exception:
         return False
 
 
-def _move_and_verify(win_id: str, x: int, y: int) -> bool:
+def _find_own_window(source_name: str):
     """
-    移动窗口并确认它真的到了目标位置附近。
-    fluxbox 有边框吸附（edge snapping），会把窗口吸到屏幕/窗口边缘，
-    所以容差放到 40px：只要不是完全没动，就认为归位成功。
+    在顶层窗口里找到属于本实例的浏览器主窗口 ID。
+    按 PID 的 cmdline 精确匹配 profile 路径，不再依赖标题唯一性
+    （所有 Camoufox 实例标题相同，靠标题无法区分）。
     """
+    out = _run(["wmctrl", "-l", "-p"])
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        win_id, _desktop, pid, _host, title = parts
+        # 必须是带标题栏的浏览器主窗口
+        if not any(hint in title for hint in _TITLE_HINTS):
+            continue
+        if _pid_matches_profile(pid, source_name):
+            return win_id
+    return None
+
+
+def _window_geometry(win_id: str):
+    """返回 (x, y, w, h)，找不到返回 None。"""
+    out = _run(["wmctrl", "-l", "-G"])
+    for line in out.splitlines():
+        parts = line.split(None, 7)
+        if len(parts) >= 8 and parts[0] == win_id:
+            return int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5])
+    return None
+
+
+def _screen_point_window(px: int, py: int):
+    """返回屏幕 (px, py) 处最顶层窗口的 ID（十六进制字符串），失败返回 None。"""
     try:
-        subprocess.run(
-            ["wmctrl", "-i", "-r", win_id, "-e", f"0,{x},{y},-1,-1"],
-            capture_output=True, timeout=10,
-        )
-        time.sleep(0.5)
-        out = subprocess.run(
-            ["wmctrl", "-l", "-G"], capture_output=True, text=True, timeout=10
-        ).stdout
-        for line in out.splitlines():
-            parts = line.split(None, 7)
-            if len(parts) < 8 or parts[0] != win_id:
-                continue
-            wx, wy = int(parts[2]), int(parts[3])
-            return abs(wx - x) <= 40 and abs(wy - y) <= 40
+        out = _run(["xdotool", "getmouselocation", "--shell"], timeout=5)
+        cur = dict(l.split("=", 1) for l in out.strip().splitlines() if "=" in l)
+        _run(["xdotool", "mousemove", str(px), str(py)], timeout=5)
+        out = _run(["xdotool", "getmouselocation", "--shell"], timeout=5)
+        loc = dict(l.split("=", 1) for l in out.strip().splitlines() if "=" in l)
+        _run(["xdotool", "mousemove", cur.get("X", "0"), cur.get("Y", "0")], timeout=5)
+        win = loc.get("WINDOW")
+        return f"0x{int(win):08x}" if win else None
     except Exception:
-        pass
-    return False
+        return None
 
 
 def _page_fully_covered(win_id: str, wx: int, wy: int,
                         win_w: int, win_h: int) -> bool:
     """
     检查窗口在 (wx, wy) 位置时，其页面区域（去掉标题栏 ~28px）是否
-    被其他窗口 100% 盖住。采样窗口中心 + 四角共 5 个点。
+    被其他窗口 100% 盖住。采样中心 + 四角共 5 个点。
     """
-    tb = 28  # 标题栏高
-    # 页面区域（不含标题栏）
+    tb = 28
     ix0, iy0 = wx + 10, wy + tb + 10
     ix1, iy1 = wx + win_w - 10, wy + win_h - 10
     samples = [
-        ((ix0 + ix1) // 2, (iy0 + iy1) // 2),  # 中心
-        (ix0, iy0), (ix1, iy0), (ix0, iy1), (ix1, iy1),  # 四角
+        ((ix0 + ix1) // 2, (iy0 + iy1) // 2),
+        (ix0, iy0), (ix1, iy0), (ix0, iy1), (ix1, iy1),
     ]
-    covered = sum(1 for (px, py) in samples
-                  if _screen_point_occluded(px, py, exclude_win_id=win_id))
+    covered = sum(
+        1 for (px, py) in samples
+        if (lambda top: top and top != win_id)(_screen_point_window(px, py))
+    )
     return covered == len(samples)
 
 
-def place_window(source_name: str, logger, browser_pid=None,
-                 win_w=_WIN_W, win_h=_WIN_H, attempts=10, interval=2):
+def place_window(source_name: str, logger, win_w=_WIN_W, win_h=_WIN_H,
+                 attempts=10, interval=2):
     """
     确保当前实例的浏览器窗口不会被其他窗口 100% 盖死（否则触发 occlusion sleep）。
 
     为什么需要这个函数：
-    persistent profile 的 xulstore.json 保存了上次窗口位置，Firefox 会带着
-    _NET_CURRENT_DESKTOP 标记复活旧窗口，fluxbox 的 CascadePlacement 对"指定了
-    桌面"的窗口直接跳过摆放逻辑（fluxbox Window.cc / Workspace.cc）——所以任何
-    实例重启后都会叠在上次的位置，其他实例重启后也叠到同一处，完全遮挡触发
-    Firefox occlusion sleep（Linux 上遮挡的是标题栏，页面区域全盖住即判定遮挡）。
-    而且 Camoufox 会把 window.screenX/screenY 指纹锁定为指纹文件里的常量（内部
-    直接改 window attribute，不走 JS 原型），所以"指纹显示的位置"与"窗口真实
-    位置"无关，真实位置必须我们在 WM 层显式管理。
+    persistent profile 的 xulstore.json 保存了上次窗口位置，Firefox 复活窗口时
+    带 _NET_CURRENT_DESKTOP 标记，fluxbox 的 CascadePlacement 对这类窗口直接
+    跳过摆放逻辑——所以实例重启后会叠在上次的位置，多个实例重启后叠到同一处，
+    完全遮挡触发 Firefox occlusion sleep。而 Camoufox 把 window.screenX/screenY
+    指纹锁成常量，真实位置必须我们在 WM 层显式管理。
 
     策略：
-    1. 等本实例的浏览器窗口出现（按 PID + 标题匹配）。
+    1. 用 PID cmdline 里的 profile 路径找到本实例的窗口（标题大家都一样，靠
+       标题无法区分）。
     2. 用 xdotool 命中测试判断页面区域是否被完全盖死。
-    3. 若被盖死，把它挪到本实例的确定性槽位（slot * step），
-       直到找到不被盖死的位置或尝试次数用尽。
-    这样首次启动和每次重启后，所有窗口最终都回到互不盖死的级联摆放。
+    3. 只有盖死时才挪到本实例的确定性槽位；没被盖死则不动，避免与 fluxbox
+       首次级联摆放打架。
     """
     slot = slot_for(source_name)
     step_x, step_y = _cascade_step()
 
     for attempt in range(attempts):
         try:
-            out = subprocess.run(
-                ["wmctrl", "-l", "-p"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
-            win_id = None
-            for line in out.splitlines():
-                parts = line.split(None, 4)
-                if len(parts) < 5:
-                    continue
-                wid, _desktop, pid, _host, title = parts
-                # 只匹配本实例的浏览器主窗口（有标题栏的顶层窗口），
-                # 排除无标题的辅助/隐藏窗口
-                if not any(hint in title for hint in _TITLE_HINTS):
-                    continue
-                # 拿到了 browser_pid 就精确匹配；没拿到就兜底匹配唯一候选
-                if browser_pid is not None and int(pid) != browser_pid:
-                    continue
-                if win_id is not None:
-                    # 出现多个候选，放弃以免误动其他实例
-                    logger.warning("匹配到多个候选窗口，跳过定位以避免误移动其他实例")
-                    return False
-                win_id = wid
-
+            win_id = _find_own_window(source_name)
             if win_id is None:
                 time.sleep(interval)
                 continue
 
-            # 取窗口当前位置
-            out_g = subprocess.run(
-                ["wmctrl", "-l", "-G"], capture_output=True, text=True, timeout=10
-            ).stdout
-            wx = wy = None
-            for line in out_g.splitlines():
-                parts = line.split(None, 7)
-                if len(parts) < 8 or parts[0] != win_id:
-                    continue
-                wx, wy = int(parts[2]), int(parts[3])
-                break
-            if wx is None:
+            geo = _window_geometry(win_id)
+            if geo is None:
                 time.sleep(interval)
                 continue
+            wx, wy, ww, wh = geo
 
-            # 若页面区域没被盖死，就保持现状（不再动）
-            if not _page_fully_covered(win_id, wx, wy, win_w, win_h):
+            # 没被盖死就保持现状
+            if not _page_fully_covered(win_id, wx, wy, ww, wh):
                 logger.debug(f"窗口未被完全遮挡，保持当前位置 ({wx}, {wy})")
                 return True
 
-            # 被盖死了：挪到本实例的确定性槽位（沿对角线铺开、边界折回）
-            x, y = _slot_position(slot, step_x, step_y, win_w, win_h)
-            if _move_and_verify(win_id, x, y):
-                logger.info(f"窗口从被完全遮挡处挪到槽位 {slot}: ({x}, {y})")
+            # 盖死了：挪到本实例的确定性槽位
+            x, y = _slot_position(slot, step_x, step_y, ww, wh)
+            _run(["wmctrl", "-i", "-r", win_id, "-e", f"0,{x},{y},-1,-1"])
+            time.sleep(0.5)
+
+            new_geo = _window_geometry(win_id)
+            if new_geo and abs(new_geo[0] - x) <= 40 and abs(new_geo[1] - y) <= 40:
+                logger.info(f"窗口从被完全遮挡处挪到槽位 {slot}: ({new_geo[0]}, {new_geo[1]})")
                 return True
-            # 挪动失败（fluxbox 夹取/超时），下一轮再试
+            # fluxbox 吸附/夹取导致没到位，下一轮重试
         except FileNotFoundError:
             logger.warning("未找到 wmctrl/xdotool，跳过窗口定位（交给 fluxbox 自行摆放）")
             return False
