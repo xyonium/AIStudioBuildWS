@@ -9,20 +9,23 @@ _SCREEN_W = 1920
 _SCREEN_H = 1080
 
 # 浏览器外窗实际尺寸（含标题栏）。
-# 注意：指纹里自报的 1440x900 只是伪装值，Camoufox 真实外窗是 1280x772，
-# 从运行中的容器 wmctrl -l -G 实测得到。布局必须按真实尺寸算，否则会误判遮挡。
+# 注意：指纹里自报的 1440x900 只是伪装值，Camoufox 真实外窗约 1280x772，
+# 从运行中的容器 wmctrl -l -G 实测得到。布局按真实尺寸算。
 _WIN_W = 1280
 _WIN_H = 772
 
-# 匹配浏览器主窗口标题的片段（Camoufox 的标题后缀是 "— Camoufox"，
+# 匹配浏览器主窗口标题的片段（Camoufox 标题后缀是 "— Camoufox"，
 # 普通 Firefox 是 "— Mozilla Firefox"，两者都兼容）。
 _TITLE_HINTS = ("— Camoufox", "— Mozilla Firefox")
+
+# 一次最多摆放的实例槽位数（超过则回绕，一般不会超过）
+_MAX_SLOTS = 10
 
 
 def _cascade_step() -> tuple:
     """
-    相邻槽位的错开步长：fluxbox 原生 cascade 步长是标题栏高（约 28px），
-    这里用 CASCADE_SCALE（默认 1.5，可用环境变量调）按标题栏放大，
+    相邻槽位的错开步长。fluxbox 原生 cascade 步长是标题栏高（约 28px），
+    这里用 CASCADE_SCALE（默认 1.5，可用环境变量调）放大，
     并限制在"任何窗口都不会被 100% 盖死"的安全范围内。
     """
     try:
@@ -31,42 +34,39 @@ def _cascade_step() -> tuple:
             raise ValueError
     except (ValueError, TypeError):
         scale = 1.5
-    titlebar = 28  # fluxbox 标题栏高（cascade 原生步长）
-    # 露出页边：保证每个窗口右缘/下缘至少露出这么多像素不被盖住
-    margin_x, margin_y = 90, 45
-    step_x = int(titlebar * scale)
-    step_y = int(titlebar * scale)
-    step_x = max(1, min(step_x, _SCREEN_W - _WIN_W - margin_x))
-    step_y = max(1, min(step_y, _SCREEN_H - _WIN_H - margin_y))
+    titlebar = 28
+    margin_x, margin_y = 90, 45  # 必须露出的页边像素
+    step_x = max(1, min(int(titlebar * scale), _SCREEN_W - _WIN_W - margin_x))
+    step_y = max(1, min(int(titlebar * scale), _SCREEN_H - _WIN_H - margin_y))
     return step_x, step_y
 
 
-def slot_for(source_name: str, max_slots: int = 10) -> int:
+def slot_for(source_name: str) -> int:
     """
-    从实例名（USER_COOKIE_12 / xxx.json）提取末尾序号作为布局槽位。
-    没有序号的来源按名字 crc32 映射。槽位即 (x=slot*STEP_X, y=slot*STEP_Y)，
-    与启动顺序无关，每个实例每次重启都回到同一个固定位置。
+    从实例名（USER_COOKIE_12 / xxx.json）提取末尾序号作为布局槽位（0 起）。
+    没有序号的来源按名字 crc32 映射。槽位即对角线第几个位置，与启动顺序无关，
+    每个实例每次启动/重启都回到同一个固定坐标，保证任意两窗口 x、y 都错开。
     """
     m = re.search(r'(\d+)', source_name)
     if m:
-        return (int(m.group(1)) - 1) % max_slots
-    return zlib.crc32(source_name.encode()) % max_slots
+        return (int(m.group(1)) - 1) % _MAX_SLOTS
+    return zlib.crc32(source_name.encode()) % _MAX_SLOTS
 
 
 def _slot_position(slot: int, step_x: int, step_y: int,
                    win_w: int, win_h: int) -> tuple:
     """
-    槽位 -> 屏幕坐标。沿对角线铺开，到达右/下边界后折回并留页边，
-    保证任何槽位的页面区域都不会被其它槽位 100% 盖死。
+    槽位 -> 屏幕坐标。沿对角线铺开 (slot*step_x, slot*step_y)，
+    到达右/下边界后折回并留页边，保证任何槽位都不会被其它槽位 100% 盖死。
     """
     max_x = max(_SCREEN_W - win_w, 0)
     max_y = max(_SCREEN_H - win_h, 0)
     x = slot * step_x
     y = slot * step_y
     if x > max_x:
-        x = max_x - (x - max_x) % 60  # 从右缘向左折回
+        x = max_x - (x - max_x) % 60
     if y > max_y:
-        y = max_y - (y - max_y) % 60  # 从下缘向上折回
+        y = max_y - (y - max_y) % 60
     return max(0, x), max(0, y)
 
 
@@ -78,8 +78,7 @@ def _pid_matches_profile(pid: str, source_name: str) -> bool:
     """
     判断窗口所属进程是不是本实例：读 /proc/<pid>/cmdline，
     匹配 camoufox 启动参数里的 -profile .../<source_name>。
-    source_name 即 profile 目录名（USER_COOKIE_N 或 json 文件名）。
-    用路径结尾边界匹配，避免 USER_COOKIE_1 误配 USER_COOKIE_10。
+    路径结尾加边界匹配，避免 USER_COOKIE_1 误配 USER_COOKIE_10。
     """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -95,8 +94,8 @@ def _pid_matches_profile(pid: str, source_name: str) -> bool:
 def _find_own_window(source_name: str):
     """
     在顶层窗口里找到属于本实例的浏览器主窗口 ID。
-    按 PID 的 cmdline 精确匹配 profile 路径，不再依赖标题唯一性
-    （所有 Camoufox 实例标题相同，靠标题无法区分）。
+    按 PID 的 cmdline 精确匹配 profile 路径（所有 Camoufox 实例标题相同，
+    靠标题无法区分；Playwright 的 persistent context 也不暴露 browser PID）。
     """
     out = _run(["wmctrl", "-l", "-p"])
     for line in out.splitlines():
@@ -104,7 +103,6 @@ def _find_own_window(source_name: str):
         if len(parts) < 5:
             continue
         win_id, _desktop, pid, _host, title = parts
-        # 必须是带标题栏的浏览器主窗口
         if not any(hint in title for hint in _TITLE_HINTS):
             continue
         if _pid_matches_profile(pid, source_name):
@@ -122,62 +120,34 @@ def _window_geometry(win_id: str):
     return None
 
 
-def _screen_point_window(px: int, py: int):
-    """返回屏幕 (px, py) 处最顶层窗口的 ID（十六进制字符串），失败返回 None。"""
-    try:
-        out = _run(["xdotool", "getmouselocation", "--shell"], timeout=5)
-        cur = dict(l.split("=", 1) for l in out.strip().splitlines() if "=" in l)
-        _run(["xdotool", "mousemove", str(px), str(py)], timeout=5)
-        out = _run(["xdotool", "getmouselocation", "--shell"], timeout=5)
-        loc = dict(l.split("=", 1) for l in out.strip().splitlines() if "=" in l)
-        _run(["xdotool", "mousemove", cur.get("X", "0"), cur.get("Y", "0")], timeout=5)
-        win = loc.get("WINDOW")
-        return f"0x{int(win):08x}" if win else None
-    except Exception:
-        return None
-
-
-def _page_fully_covered(win_id: str, wx: int, wy: int,
-                        win_w: int, win_h: int) -> bool:
-    """
-    检查窗口在 (wx, wy) 位置时，其页面区域（去掉标题栏 ~28px）是否
-    被其他窗口 100% 盖住。采样中心 + 四角共 5 个点。
-    """
-    tb = 28
-    ix0, iy0 = wx + 10, wy + tb + 10
-    ix1, iy1 = wx + win_w - 10, wy + win_h - 10
-    samples = [
-        ((ix0 + ix1) // 2, (iy0 + iy1) // 2),
-        (ix0, iy0), (ix1, iy0), (ix0, iy1), (ix1, iy1),
-    ]
-    covered = sum(
-        1 for (px, py) in samples
-        if (lambda top: top and top != win_id)(_screen_point_window(px, py))
-    )
-    return covered == len(samples)
-
-
 def place_window(source_name: str, logger, win_w=_WIN_W, win_h=_WIN_H,
                  attempts=10, interval=2):
     """
-    确保当前实例的浏览器窗口不会被其他窗口 100% 盖死（否则触发 occlusion sleep）。
+    把当前实例的浏览器窗口摆到它自己的确定性槽位，保证和其它实例错开。
 
-    为什么需要这个函数：
-    persistent profile 的 xulstore.json 保存了上次窗口位置，Firefox 复活窗口时
-    带 _NET_CURRENT_DESKTOP 标记，fluxbox 的 CascadePlacement 对这类窗口直接
-    跳过摆放逻辑——所以实例重启后会叠在上次的位置，多个实例重启后叠到同一处，
-    完全遮挡触发 Firefox occlusion sleep。而 Camoufox 把 window.screenX/screenY
-    指纹锁成常量，真实位置必须我们在 WM 层显式管理。
+    为什么必须显式摆正，而不能靠 fluxbox 的 CascadePlacement：
+    persistent profile 的 xulstore.json 让 Firefox 复活窗口时带
+    _NET_CURRENT_DESKTOP 标记，fluxbox 对这类窗口跳过摆放逻辑——于是重启后
+    窗口会被 fluxbox 的边框吸附吸到同一行（实测全部落在 y=107，只往右错开、
+    上下不动），多个实例叠在同一水平带，缺乏纵向冗余。而 Camoufox 把
+    window.screenX/screenY 指纹锁成常量，真实位置只能我们在 WM 层显式管理。
 
-    策略：
-    1. 用 PID cmdline 里的 profile 路径找到本实例的窗口（标题大家都一样，靠
-       标题无法区分）。
-    2. 用 xdotool 命中测试判断页面区域是否被完全盖死。
-    3. 只有盖死时才挪到本实例的确定性槽位；没被盖死则不动，避免与 fluxbox
-       首次级联摆放打架。
+    之前尝试过"先 xdotool 命中测试判断是否被盖死、只在盖死时才挪"，但
+    xdotool 取屏幕栈顶窗口不可靠，会漏判/误判。所以改为无条件归位：
+    反正目标坐标是本实例的确定性槽位，摆一次和摆多次结果一样（幂等）。
+
+    策略：找到本实例窗口（按 PID cmdline 匹配 profile 路径）-> 计算槽位
+    坐标 -> wmctrl 移动 -> 读回几何确认到位（fluxbox 有边框吸附，容差放宽）。
     """
     slot = slot_for(source_name)
     step_x, step_y = _cascade_step()
+    x, y = _slot_position(slot, step_x, step_y, win_w, win_h)
+
+    # fluxbox 把 wmctrl -e 传入的 y 当作外框上缘（不含标题栏），而 wmctrl -l -G
+    # 读回的 y 含 ~39px 标题栏。为了让读回坐标精确落在槽位上，发命令时 y 减去
+    # 标题栏高做补偿（实测偏移恒为 39，槽位0 也不会出屏，fluxbox 会夹在 0）。
+    _TITLEBAR = 39
+    cmd_y = y - _TITLEBAR
 
     for attempt in range(attempts):
         try:
@@ -190,30 +160,29 @@ def place_window(source_name: str, logger, win_w=_WIN_W, win_h=_WIN_H,
             if geo is None:
                 time.sleep(interval)
                 continue
-            wx, wy, ww, wh = geo
 
-            # 没被盖死就保持现状
-            if not _page_fully_covered(win_id, wx, wy, ww, wh):
-                logger.debug(f"窗口未被完全遮挡，保持当前位置 ({wx}, {wy})")
+            # 已经在槽位附近就不再动（幂等）。容差要小于标题栏补偿量 39，
+            # 否则会把"差一个标题栏高"的窗口误判成已到位而跳过修正；
+            # 取 15px（大于 fluxbox 正常吸附的 1-2px）。
+            if abs(geo[0] - x) <= 15 and abs(geo[1] - y) <= 15:
+                logger.debug(f"窗口已在槽位 {slot} 附近 ({geo[0]}, {geo[1]})，无需调整")
                 return True
 
-            # 盖死了：挪到本实例的确定性槽位
-            x, y = _slot_position(slot, step_x, step_y, ww, wh)
-            _run(["wmctrl", "-i", "-r", win_id, "-e", f"0,{x},{y},-1,-1"])
+            _run(["wmctrl", "-i", "-r", win_id, "-e", f"0,{x},{cmd_y},-1,-1"])
             time.sleep(0.5)
 
             new_geo = _window_geometry(win_id)
-            if new_geo and abs(new_geo[0] - x) <= 40 and abs(new_geo[1] - y) <= 40:
-                logger.info(f"窗口从被完全遮挡处挪到槽位 {slot}: ({new_geo[0]}, {new_geo[1]})")
+            if new_geo and abs(new_geo[0] - x) <= 15 and abs(new_geo[1] - y) <= 15:
+                logger.info(f"窗口已归位到槽位 {slot}: ({new_geo[0]}, {new_geo[1]})")
                 return True
             # fluxbox 吸附/夹取导致没到位，下一轮重试
         except FileNotFoundError:
-            logger.warning("未找到 wmctrl/xdotool，跳过窗口定位（交给 fluxbox 自行摆放）")
+            logger.warning("未找到 wmctrl，跳过窗口归位（交给 fluxbox 自行摆放）")
             return False
         except Exception as e:
-            logger.debug(f"窗口定位第 {attempt + 1} 次尝试出错: {e}")
+            logger.debug(f"窗口归位第 {attempt + 1} 次尝试出错: {e}")
 
         time.sleep(interval)
 
-    logger.warning(f"窗口定位失败：{attempts} 次尝试后仍未完成")
+    logger.warning(f"窗口归位失败：{attempts} 次尝试后仍未完成")
     return False
