@@ -216,6 +216,15 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
                     logger.error("Cookie验证失败: 被重定向到Google登录页，Cookie已失效")
                     raise KeepAliveError("Cookie失效，需要重启浏览器实例")
 
+                # 安全网：每小时顺带确认窗口还在自己的槽位（防止运行中漂移/
+                # 被 fluxbox 重新吸附导致纵向重叠），place_window 是幂等的，
+                # 已在槽位则直接返回，开销极小。
+                try:
+                    from browser.window_placer import place_window
+                    place_window(cookie_file_config, logger, attempts=2, interval=1)
+                except Exception:
+                    pass
+
                 click_counter = 0  # 重置计数器
 
             # 使用可中断的睡眠，每秒检查一次关闭信号

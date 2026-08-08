@@ -16,6 +16,8 @@ _WIN_H = 772
 
 # 匹配浏览器主窗口标题的片段（Camoufox 标题后缀是 "— Camoufox"，
 # 普通 Firefox 是 "— Mozilla Firefox"，两者都兼容）。
+# 空标题（页面还没加载出来的瞬间）也接受——反正归属靠 PID cmdline 精确匹配，
+# 标题只是用来排除明显的非浏览器窗口，重启早期标题可能是空的。
 _TITLE_HINTS = ("— Camoufox", "— Mozilla Firefox")
 
 # 一次最多摆放的实例槽位数（超过则回绕，一般不会超过）
@@ -53,21 +55,27 @@ def slot_for(source_name: str) -> int:
     return zlib.crc32(source_name.encode()) % _MAX_SLOTS
 
 
+# 布局整体下压量：wmctrl 读回的 y 含标题栏，但发命令时 y 要减去标题栏高做
+# 补偿，槽位 0 会变成负数、被 fluxbox 顶到屏幕外（标题栏超出桌面顶部）。
+# 把所有槽位整体下移一个标题栏高，保证最上面窗口的外框也完整落在桌面内。
+_TOP_INSET = 39
+
+
 def _slot_position(slot: int, step_x: int, step_y: int,
                    win_w: int, win_h: int) -> tuple:
     """
-    槽位 -> 屏幕坐标。沿对角线铺开 (slot*step_x, slot*step_y)，
+    槽位 -> 屏幕坐标。沿对角线铺开 (slot*step_x, _TOP_INSET + slot*step_y)，
     到达右/下边界后折回并留页边，保证任何槽位都不会被其它槽位 100% 盖死。
     """
     max_x = max(_SCREEN_W - win_w, 0)
     max_y = max(_SCREEN_H - win_h, 0)
     x = slot * step_x
-    y = slot * step_y
+    y = _TOP_INSET + slot * step_y
     if x > max_x:
         x = max_x - (x - max_x) % 60
     if y > max_y:
         y = max_y - (y - max_y) % 60
-    return max(0, x), max(0, y)
+    return max(0, x), max(_TOP_INSET, y)
 
 
 def _run(cmd, timeout=10):
@@ -94,8 +102,9 @@ def _pid_matches_profile(pid: str, source_name: str) -> bool:
 def _find_own_window(source_name: str):
     """
     在顶层窗口里找到属于本实例的浏览器主窗口 ID。
-    按 PID 的 cmdline 精确匹配 profile 路径（所有 Camoufox 实例标题相同，
+    归属判断靠 PID 的 cmdline 匹配 profile 路径（所有 Camoufox 实例标题相同，
     靠标题无法区分；Playwright 的 persistent context 也不暴露 browser PID）。
+    标题只做宽松过滤：重启早期页面没加载时标题可能是空/辅助名，不能因此漏配。
     """
     out = _run(["wmctrl", "-l", "-p"])
     for line in out.splitlines():
@@ -103,8 +112,7 @@ def _find_own_window(source_name: str):
         if len(parts) < 5:
             continue
         win_id, _desktop, pid, _host, title = parts
-        if not any(hint in title for hint in _TITLE_HINTS):
-            continue
+        # 归属是第一位的：只要 PID 属于本实例的 profile，就是我们要的窗口
         if _pid_matches_profile(pid, source_name):
             return win_id
     return None
@@ -121,7 +129,7 @@ def _window_geometry(win_id: str):
 
 
 def place_window(source_name: str, logger, win_w=_WIN_W, win_h=_WIN_H,
-                 attempts=10, interval=2):
+                 attempts=45, interval=2):
     """
     把当前实例的浏览器窗口摆到它自己的确定性槽位，保证和其它实例错开。
 

@@ -194,14 +194,6 @@ def run_browser_instance(config, shutdown_event=None):
                 # 获取持久化上下文中已有的默认页面，如果没有则新建
                 page = context.pages[0] if context.pages else context.new_page()
 
-                # 防止窗口被其他实例 100% 盖死（会触发 Firefox occlusion sleep）。
-                # 根因：persistent profile 的 xulstore.json 会让 Firefox 带着
-                # _NET_CURRENT_DESKTOP 标记复活窗口，fluxbox 的 CascadePlacement
-                # 对这类窗口直接跳过摆放，所以重启后窗口会全叠在上次的位置。
-                # 仅在检测到页面区域被完全遮挡时才挪到本实例的确定性槽位；
-                # 无 wmctrl 的环境（本地开发）会优雅跳过，不影响流程。
-                place_window(diagnostic_tag, logger)
-
                 # 依然兼容你现有的环境变量/JSON导入逻辑（当作初始凭证注入）
                 if cookies:
                     context.add_cookies(cookies)
@@ -585,6 +577,16 @@ def run_browser_instance(config, shutdown_event=None):
 
                 # 5. 所有验证通过，确认成功！
                 logger.info("所有验证通过，确认已成功登录并准备就绪")
+
+                # 防止窗口被其他实例 100% 盖死（会触发 Firefox occlusion sleep）。
+                # 根因：persistent profile 的 xulstore.json 会让 Firefox 带着
+                # _NET_CURRENT_DESKTOP 标记复活窗口，fluxbox 的 CascadePlacement
+                # 对这类窗口直接跳过摆放，所以重启后窗口会叠在上次的位置。
+                # 在页面完全加载后调用（此时窗口已稳定存在，重启瞬间窗口/标题
+                # 可能还没就绪，太早调用会找不到窗口而归位失败）。把窗口摆到
+                # 本实例的确定性槽位，保证和其它实例错开。
+                place_window(diagnostic_tag, logger)
+
                 handle_successful_navigation(page, logger, diagnostic_tag, shutdown_event, cookie_validator, expected_path, expected_url, auth_401_count, AUTH_401_THRESHOLD)
 
                 # 移除 response 监听器
