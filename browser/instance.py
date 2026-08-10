@@ -541,8 +541,15 @@ def run_browser_instance(config, shutdown_event=None):
                 # 页面初始化阶段 (goto + 弹窗处理 + iframe加载) 会有大量正常的 401
                 # (alkalimakersuite-pa 等 API 在 token 建立前会返回 401，这是正常行为)
                 # 所以我们只在所有初始化完成后才注册监听器，用于后续的保活阶段
-                auth_401_count = [0]  # 计数器而非布尔值，避免偶发 401 误杀
-                AUTH_401_THRESHOLD = int(os.getenv("AUTH_FAILURE_THRESHOLD", "5"))  # 连续认证失败阈值（默认5次，可环境变量调整）
+                auth_401_count = [0]  # 各端点"连续失败数"的最大值，供保活循环轮询
+                AUTH_401_THRESHOLD = int(os.getenv("AUTH_FAILURE_THRESHOLD", "3"))  # 同一端点连续认证失败阈值（默认3次，可环境变量调整）
+                auth_fail_by_method = {}  # rpc方法名 -> 该方法连续失败次数
+
+                def _rpc_method_name(url):
+                    """提取 API 方法名（去掉 query，避免泄露 key/token 等参数）"""
+                    tail = url.split('?')[0].rstrip('/').rsplit('/', 1)[-1]
+                    # $rpc 全路径较长（如 google.internal...MakerSuiteService.CountTokens），只保留方法名
+                    return tail.rsplit('.', 1)[-1] if '.' in tail else tail
 
                 def on_response_post_init(response):
                     """页面完全加载后的 API 认证失败/成功监听"""
@@ -552,25 +559,49 @@ def run_browser_instance(config, shutdown_event=None):
                         "generativelanguage.googleapis.com",
                         "alkalimakersuite-pa.clients6.google.com",
                     ]):
+                        req_method = response.request.method
+                        # CORS 预检 OPTIONS 恒返回 200，不代表真实 API 成功，必须忽略——
+                        # 否则每次真实请求 403 前都有一个预检 200 把计数器清零，阈值永远到不了
+                        if req_method in ("OPTIONS", "HEAD"):
+                            return
+                        method_name = _rpc_method_name(url)
                         if response.status == 401 or response.status == 403:
-                            auth_401_count[0] += 1
+                            auth_fail_by_method[method_name] = auth_fail_by_method.get(method_name, 0) + 1
+                            count = auth_fail_by_method[method_name]
+                            auth_401_count[0] = max(auth_fail_by_method.values())
+                            # 401 = 令牌/登录态失效；403 = 权限、配额或来源风控（均非网络故障）
+                            hint = "登录态/令牌失效" if response.status == 401 else "权限/配额/来源限制"
+                            # 首次失败时抓取响应体（Google 返回 JSON error，含 PERMISSION_DENIED/QUOTA 等具体原因）
+                            body_snippet = ""
+                            if count == 1:
+                                try:
+                                    ctype = response.headers.get("content-type", "")
+                                    if "json" in ctype or "text" in ctype:
+                                        body_snippet = f" | 响应体: {response.text()[:300]}"
+                                except Exception:
+                                    pass
                             logger.warning(
-                                f"[{diagnostic_tag}] API 认证失败 ({auth_401_count[0]}/{AUTH_401_THRESHOLD}): "
-                                f"URL: {url[:100]}... 状态码: {response.status}"
+                                f"[{diagnostic_tag}] API 认证失败 [{method_name}] ({count}/{AUTH_401_THRESHOLD}): "
+                                f"{req_method} {url.split('?')[0][:120]} 状态码: {response.status} ({hint}){body_snippet}"
                             )
-                            if auth_401_count[0] >= AUTH_401_THRESHOLD:
+                            if count >= AUTH_401_THRESHOLD:
                                 # 不在回调里抛异常（Playwright 事件回调的异常不会传播到主循环），
                                 # 仅打日志；由 handle_successful_navigation 的保活循环轮询
                                 # auth_401_count 并抛 KeepAliveError 重启自愈
                                 logger.error(
-                                    f"[{diagnostic_tag}] 连续 {AUTH_401_THRESHOLD} 次 API 认证失败，"
+                                    f"[{diagnostic_tag}] 端点 [{method_name}] 连续 {AUTH_401_THRESHOLD} 次 API 认证失败，"
                                     f"等待保活循环重建会话"
                                 )
                         elif 200 <= response.status < 300:
-                            # 成功的 API call 清零连续失败计数器
-                            if auth_401_count[0] > 0:
-                                logger.info(f"[{diagnostic_tag}] API 请求成功 ({response.status})，重置 API 认证失败计数器")
-                                auth_401_count[0] = 0
+                            # 只重置同一方法的连续失败计数——同主机上其他端点的成功
+                            # 不能掩盖本端点的持续失败（否则阈值同样永远到不了）
+                            if auth_fail_by_method.get(method_name, 0) > 0:
+                                logger.info(
+                                    f"[{diagnostic_tag}] API 请求成功 [{method_name}] ({response.status})，"
+                                    f"重置该方法失败计数"
+                                )
+                                auth_fail_by_method[method_name] = 0
+                                auth_401_count[0] = max(auth_fail_by_method.values())
 
                 page.on("response", on_response_post_init)
                 # ====================================================
