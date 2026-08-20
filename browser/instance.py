@@ -4,6 +4,7 @@ import time
 import json
 import subprocess
 import gc
+from urllib.parse import urlparse
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
 from utils.logger import setup_logging
 from utils.cookie_manager import CookieManager
@@ -275,9 +276,21 @@ def run_browser_instance(config, shutdown_event=None):
                 expected_path = extract_url_path(expected_url).split('?')[0]
 
                 # 1. 目标页面等待逻辑（支持通过环境变量 MANUAL_LOGIN_TIMEOUT 配置超时时间）
+                # 目标页域名白名单：ai.studio 与 aistudio.google.com 互为别名（启动时 ai.studio
+                # 会 301 到 aistudio.google.com），到达其中任一域名才算"到了目标页"。
+                # 关键：不能只比路径！Google 登录页的 URL 长这样
+                #   https://accounts.google.com/v3/signin/identifier?continue=https://aistudio.google.com/apps/<ID>
+                # continue 参数（未编码时）原文包含目标路径，纯路径子串匹配会把登录页
+                # 误判成"已到达目标页"，跳过人工登录等待，随后 iframe 等待超时 ->
+                # 重启循环重建页面，人工根本来不及登录（403 清 Profile 后必现）。
+                target_hosts = ("ai.studio", "aistudio.google.com")
+
                 def is_at_target_url():
+                    host = urlparse(page.url).hostname or ""
+                    if not any(host == h or host.endswith("." + h) for h in target_hosts):
+                        return False
                     current_path = extract_url_path(page.url)
-                    return expected_path and expected_path in current_path
+                    return bool(expected_path) and expected_path in current_path
 
                 if not is_at_target_url():
                     logger.warning(f"[{diagnostic_tag}] 尚未到达目标页面！当前在: {mask_url_for_logging(page.url)}")
