@@ -12,7 +12,7 @@ from browser.navigation import handle_successful_navigation, KeepAliveError
 from browser.cookie_validator import CookieValidator
 from camoufox.sync_api import Camoufox
 from utils.paths import logs_dir
-from utils.common import parse_headless_mode, ensure_dir
+from utils.common import parse_headless_mode, ensure_dir, clean_env_value
 from utils.url_helper import extract_url_path, mask_url_for_logging, mask_path_for_logging
 from camoufox.utils import launch_options as generate_launch_options
 from browserforge.fingerprints import Screen
@@ -198,6 +198,24 @@ def run_browser_instance(config, shutdown_event=None):
                 # 依然兼容你现有的环境变量/JSON导入逻辑（当作初始凭证注入）
                 if cookies:
                     context.add_cookies(cookies)
+
+                # ====== 注入稳定的 provider 名称，供 AI Studio App 注册 CLIProxyAPI 时使用 ======
+                # App 代码在 Preview iframe 内通过 window.__PROVIDER_NAME__ 读取该值，
+                # 拼到 WS 连接 URL 的 provider_name 参数上；带 ProviderFactory 补丁的
+                # CLIProxyAPI 会以该名注册 provider，重连/重启时替换同名旧会话，
+                # 而不是每次产生新的随机 aistudio-XXXX，保持用量统计归属稳定。
+                # add_init_script 对 context 内所有 frame（含跨域 iframe）的每次导航生效。
+                # 默认取 Cookie 来源名（USER_COOKIE_N / 文件名去 .json），与账户一一对应；
+                # 可用 PROVIDER_NAME_<来源名大写> 环境变量覆盖（如 PROVIDER_NAME_USER_COOKIE_1=alice）。
+                provider_name = cookie_source.display_name
+                if provider_name.lower().endswith(".json"):
+                    provider_name = provider_name[:-5]
+                provider_name_override_env = "PROVIDER_NAME_" + "".join(
+                    c if c.isalnum() else "_" for c in provider_name.upper()
+                )
+                provider_name = clean_env_value(os.getenv(provider_name_override_env)) or provider_name
+                context.add_init_script(f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};")
+                logger.info(f"已注入 provider 名称: {provider_name}（可用环境变量 {provider_name_override_env} 覆盖）")
 
                 # 创建Cookie验证器 (原有代码不需要改，context 对象完美兼容)
                 cookie_validator = CookieValidator(page, context, logger)
