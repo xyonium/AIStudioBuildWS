@@ -188,7 +188,12 @@ async function handleHttpRequest(request: WSHttpRequestMessage) {
             // maxOutputTokens: 32768, thinkingConfig.includeThoughts: true
             // Skipped for :countTokens (its body schema is strict; adding
             // generationConfig there would re-trigger the 400 INVALID_ARGUMENT).
-            if (!url.includes(':countTokens') && !url.includes('/countTokens')) {
+            // Also skipped for non-chat models (transcribe/tts): they reject
+            // thinkingConfig entirely ("Thinking is not enabled for this model",
+            // 400 INVALID_ARGUMENT, verified against gemini-3.5-transcribe), so
+            // neither default is injected and the body stays bare.
+            const isNonChatModel = /(?:-transcribe(?:-live)?|-tts)(?:[/?]|$)/i.test(url) || /models\/[^/]*(?:-transcribe|-tts)(?:-[a-z0-9-]+)?:(?:stream)?generatecontent/i.test(url);
+            if (!url.includes(':countTokens') && !url.includes('/countTokens') && !isNonChatModel) {
                 let defaultsApplied = false;
 
                 if (!parsedBody.generationConfig) {
