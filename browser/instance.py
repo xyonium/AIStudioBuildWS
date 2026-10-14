@@ -10,6 +10,7 @@ from utils.logger import setup_logging
 from utils.cookie_manager import CookieManager
 from browser.navigation import handle_successful_navigation, KeepAliveError
 from browser.cookie_validator import CookieValidator
+from browser.park_and_wait import park_and_wait
 from camoufox.sync_api import Camoufox
 from utils.paths import logs_dir
 from utils.common import parse_headless_mode, ensure_dir, clean_env_value
@@ -160,6 +161,52 @@ def run_browser_instance(config, shutdown_event=None):
     manual_login_timeout = int(os.getenv("MANUAL_LOGIN_TIMEOUT", "600"))
     retry_count = 0
     base_delay = 3
+
+    # =====================================================================
+    # 停车/接管辅助：目标页"已就绪"判定器
+    # =====================================================================
+    # 判据与启动时的 is_at_target_url 保持一致：host 必须落在 ai.studio 白
+    # 名单内（accounts.google.com 的 continue= 参数里含目标路径，纯路径
+    # 匹配会把登录页误判成"已到达"），且当前 path 含期望 path。
+    # 返回的是闭包，读取的是当前 page.url，因此可反复调用。
+    def _build_is_ready(current_page, expected_path_str):
+        def _check():
+            host = urlparse(current_page.url).hostname or ""
+            if not any(host == h or host.endswith("." + h) for h in ("ai.studio", "aistudio.google.com")):
+                return False
+            current_path = extract_url_path(current_page.url)
+            return bool(expected_path_str) and expected_path_str in current_path
+        return _check
+
+    # =====================================================================
+    # 浏览器已死时的"停车"重建器
+    # =====================================================================
+    # 三种认输路径里 SystemExit(1) / 重试耗尽 / 未预期异常 都发生在 with
+    # Camoufox 已销毁之后——page 是死的，没法就地停车。这里统一用**同一套
+    # fingerprint + profile 目录**重新 launch 一个浏览器，只做两件事：
+    #   1. 注入 __PROVIDER_NAME__ init script（否则停去的 google.com 页面
+    #      不含 provider 名，后续人工导航回 AI Studio 时 WS URL 会缺名字，
+    #      CLIProxyAPI 又会注册成随机 aistudio-XXXX）；
+    #   2. 打开 page 供调用方 park_and_wait 停车。
+    # 重建这一步会碰 Google 一次，这是用户明确接受的；它发生在**已经耗尽
+    # 所有自动重试之后**，不会放大反爬信号。
+    def _relaunch_browser_for_park(reason_str):
+        logger.warning(f"[{diagnostic_tag}] 浏览器已死（{reason_str}），正在重建以便停车等待人工...")
+        context_manager = Camoufox(**launch_options)
+        context = context_manager.__enter__()
+
+        # 与正常启动保持一致的 provider 注入
+        provider_name = cookie_source.display_name
+        if provider_name.lower().endswith(".json"):
+            provider_name = provider_name[:-5]
+        provider_name_override_env = "PROVIDER_NAME_" + "".join(
+            c if c.isalnum() else "_" for c in provider_name.upper()
+        )
+        provider_name = clean_env_value(os.getenv(provider_name_override_env)) or provider_name
+        context.add_init_script(f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};")
+
+        new_page = context.pages[0] if context.pages else context.new_page()
+        return context_manager, context, new_page
 
     while True:
         # 检查是否收到全局关闭信号
@@ -320,9 +367,21 @@ def run_browser_instance(config, shutdown_event=None):
                         page.wait_for_timeout(5000)
                         wait_time += 5
                     if not is_at_target_url():
-                        logger.error(f"[{diagnostic_tag}] {manual_login_timeout}秒内未到达目标页面，退出并放弃该实例。")
+                        # 不是"放弃"而是"停车等待"：浏览器还活着、cookie/profile 都在，
+                        # 把页面导航到 google.com 停止一切自动交互，等人工把地址开回
+                        # AI Studio 后接着走完初始化（复用当前这个 page，不起新浏览器）。
+                        logger.warning(
+                            f"[{diagnostic_tag}] {manual_login_timeout}秒内未到达目标页面，"
+                            f"改为停车等待模式（不再自动触碰 Google）"
+                        )
                         page.screenshot(path=os.path.join(screenshot_dir, f"FAIL_manual_action_timeout_{diagnostic_tag}.png"))
-                        return
+                        is_ready = _build_is_ready(page, expected_path)
+                        if park_and_wait(page, diagnostic_tag, logger, is_ready, shutdown_event):
+                            logger.info(f"[{diagnostic_tag}] 人工操作完成，成功到达目标页面！")
+                        else:
+                            # 只在 PARK_TIMEOUT>0 且超时、或收到全局关闭时走到这里
+                            logger.info(f"[{diagnostic_tag}] 停车等待结束（超时或收到关闭信号），退出实例")
+                            return
                     else:
                         logger.info(f"[{diagnostic_tag}] 人工操作完成，成功到达目标页面！")
 
@@ -685,8 +744,30 @@ def run_browser_instance(config, shutdown_event=None):
 
             retry_count += 1
             if retry_count > max_retries:
-                logger.error(f"重试次数已达上限 ({max_retries})，实例不再重启，退出")
-                return
+                # 不再"自杀退出"，改为"停车等待人工"。浏览器已被 with 销毁，
+                # 必须重建一个（同 fingerprint + 同 profile 目录）再停车。
+                logger.error(f"重试次数已达上限 ({max_retries})，不再自动重试以避免反爬误判，转为停车等待人工")
+                context_manager = None
+                try:
+                    context_manager, _context, park_page = _relaunch_browser_for_park("重试耗尽")
+                    is_ready = _build_is_ready(park_page, expected_path)
+                    if park_and_wait(park_page, diagnostic_tag, logger, is_ready, shutdown_event):
+                        logger.info(f"[{diagnostic_tag}] 人工已在停车页把地址开回 AI Studio，重新走初始化流程")
+                        retry_count = 0  # 接管成功，重试计数归零
+                        continue
+                    else:
+                        retry_count = 0
+                        logger.info(f"[{diagnostic_tag}] 停车等待结束（超时或收到关闭信号），退出实例")
+                        return
+                except Exception as park_e:
+                    logger.error(f"[{diagnostic_tag}] 重试耗尽后停车失败（{park_e}），放弃并退出实例")
+                    return
+                finally:
+                    if context_manager is not None:
+                        try:
+                            context_manager.__exit__(None, None, None)
+                        except Exception:
+                            pass
             # 指数退避：3秒、6秒、12秒、24秒...最长60秒
             delay = min(base_delay * (2 ** (retry_count - 1)), 60)
             logger.error(f"浏览器实例出现错误 (重试 {retry_count}/{max_retries})，将在 {delay} 秒后重启浏览器实例: {e}")
@@ -696,13 +777,56 @@ def run_browser_instance(config, shutdown_event=None):
             logger.info(f"用户中断，正在关闭...")
             return
         except SystemExit as e:
-            # 捕获Cookie验证失败时的系统退出
+            # cookie 验证 3 次网络超时（cookie_validator.py 抛的 SystemExit(1)）会落到
+            # 这里。此刻浏览器已随 with 退出销毁，page 不可用；停车必须重建一个浏览器，
+            # 用同一 fingerprint + 同一 profile 目录，再停到 google.com 等人工。
             if e.code == 1:
-                logger.error("Cookie验证失败，关闭进程实例")
+                logger.error(f"[{diagnostic_tag}] Cookie 验证连续网络超时，浏览器已销毁，重建以便停车等待人工...")
+                context_manager = None
+                try:
+                    context_manager, _context, park_page = _relaunch_browser_for_park("SystemExit(1)")
+                    is_ready = _build_is_ready(park_page, expected_path)
+                    if park_and_wait(park_page, diagnostic_tag, logger, is_ready, shutdown_event):
+                        logger.info(f"[{diagnostic_tag}] 人工已在停车页把地址开回 AI Studio，重新走初始化流程")
+                        retry_count = 0  # 接管成功，重试计数归零
+                        continue
+                    else:
+                        retry_count = 0
+                        logger.info(f"[{diagnostic_tag}] 停车等待结束（超时或收到关闭信号），退出实例")
+                        return
+                except Exception as park_e:
+                    logger.error(f"[{diagnostic_tag}] SystemExit 后停车失败（{park_e}），放弃并退出实例")
+                    return
+                finally:
+                    if context_manager is not None:
+                        try:
+                            context_manager.__exit__(None, None, None)
+                        except Exception:
+                            pass
             else:
                 logger.info(f"实例正常退出，退出码: {e.code}")
-            return
+                return
         except Exception as e:
-            # 这是一个最终的捕获，用于捕获所有未预料到的错误
+            # 未预期异常也一律停车等人工，而不是直接死掉
             logger.exception(f"运行 Camoufox 实例时发生未预料的严重错误: {e}")
-            return
+            context_manager = None
+            try:
+                context_manager, _context, park_page = _relaunch_browser_for_park("未预期异常")
+                is_ready = _build_is_ready(park_page, expected_path)
+                if park_and_wait(park_page, diagnostic_tag, logger, is_ready, shutdown_event):
+                    logger.info(f"[{diagnostic_tag}] 人工已在停车页把地址开回 AI Studio，重新走初始化流程")
+                    retry_count = 0  # 接管成功，重试计数归零
+                    continue
+                else:
+                    retry_count = 0
+                    logger.info(f"[{diagnostic_tag}] 停车等待结束（超时或收到关闭信号），退出实例")
+                    return
+            except Exception as park_e:
+                logger.error(f"[{diagnostic_tag}] 未预期异常后停车失败（{park_e}），放弃并退出实例")
+                return
+            finally:
+                if context_manager is not None:
+                    try:
+                        context_manager.__exit__(None, None, None)
+                    except Exception:
+                        pass

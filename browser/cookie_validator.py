@@ -68,8 +68,9 @@ class CookieValidator:
             bool: Cookie是否有效
 
         Raises:
-            SystemExit: 当所有重试均因网络超时而失败时，强制退出当前子进程，
-                        防止带着失效Cookie无限重试导致内存泄漏。
+            SystemExit: 当所有重试均因网络超时时抛 SystemExit(1)。instance.py 会
+                        检出该信号，重建浏览器后停车到 google.com 等人工接管
+                        （不再无限重试触发反爬，也不再退出进程）。
         """
         for attempt in range(1, max_retries + 1):
             self.logger.info(f"开始Cookie验证... (第 {attempt}/{max_retries} 次)")
