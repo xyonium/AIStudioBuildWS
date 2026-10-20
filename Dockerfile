@@ -18,8 +18,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 下载 camoufox
-RUN camoufox fetch
+# 下载 camoufox，并裁剪不会在当前 Linux 指纹下加载的字体桶以缩小镜像
+# camoufox/utils.py:526-539 — update_fonts(config, target_os)，仅加载与指纹 target_os 匹配的那一个桶；
+# 本仓库指纹由 BrowserForge 生成，os 未显式传入 → target_os = 'lin'，M/MW/W 三个桶从不被读取，
+# 但它们合计占 ~1.2GB（M=810MB mac + W=354MB win + MW=20MB mac&win 共有）。
+# L/LM/LW/LMW/TwemojiMozilla.ttf 保留：Linux 指纹可能从 L 并集（L+LM+LW+LMW）抽样。
+RUN camoufox fetch && \
+    rm -rf /root/.cache/camoufox/fonts/M \
+           /root/.cache/camoufox/fonts/W \
+           /root/.cache/camoufox/fonts/MW
 
 # 将项目中的所有文件拷贝到工作目录
 COPY . .
