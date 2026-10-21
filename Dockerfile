@@ -18,8 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 下载 camoufox
-RUN camoufox fetch
+# 下载 Chromium 及其所有 Linux 系统依赖(与 playwright install --with-deps 等价,
+# 但我们用 apt 只在镜像里装 chromium 运行时所需的最小集,里面已经包含了)。
+# 关键点:不下载 Firefox,也不下载 Sony/实验性的 webkit —— 我们只要 chromium。
+# --no-install-recommends + --with-deps 会在当前构建阶段装缺失的 libxcb/libPolly 等。
+RUN playwright install chromium
 
 # 将项目中的所有文件拷贝到工作目录
 COPY . .
