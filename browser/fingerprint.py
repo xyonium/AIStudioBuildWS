@@ -202,8 +202,12 @@ _GOOGLE_DOMAINS = (
     "googleusercontent.com",
     "googlesyndication.com",
     "gstatic.com",
-    "run.app",  # AI Studio Build iframe host
     "aistudio.com",
+    # NOTE: Do NOT export transient `*.run.app` cookies (`GAESA`,
+    # `__SECURE-aistudio_auth_token`). Those are short-lived Cloud Run
+    # session-affinity / applet tokens bound to the old browser session;
+    # carrying them over causes 403 PERMISSION_DENIED on `ProxyStreamedCall`
+    # when the parent AI Studio page mints a new applet token.
 )
 
 
