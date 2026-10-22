@@ -137,44 +137,49 @@ def load_or_create_fingerprint(profile_dir: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def build_injection_js(fp_data: Dict[str, Any]) -> str:
-    """Build prototype-level stealth injection script from locked fingerprint.
+    """Build minimal, non-intrusive init script for Chromium.
 
-    Uses BrowserForge's native `InjectFunction(fp)` (which proxies
-    Navigator.prototype, Screen.prototype, navigator.userAgentData,
-    WebGLRenderingContext.prototype.getParameter, HTMLMediaElement.canPlayType,
-    navigator.getBattery, and Intl) with two surgical adjustments for
-    Google AI Studio Build:
-      1. Neutralize `overrideStatic()` so `window.SharedArrayBuffer` is NOT
-         clobbered to `undefined` (AI Studio preview sandboxes rely on it).
-      2. Ensure `window.chrome.runtime` stub exists without clobbering real
-         `window.chrome` properties on headed Chromium.
+    CRITICAL LESSON FROM PRODUCTION:
+    Google's `accounts.google.com` sign-in flow actively detects ES6 Proxy
+    wrappers on `Navigator.prototype` / `Function.prototype.toString` (which
+    BrowserForge's `InjectFunction` installs) AND detects mismatches between
+    a spoofed Windows Chrome 147 User-Agent and the real Chromium 136 binary
+    behavior. When detected, Google blocks manual login with:
+      "This browser or app may not be secure. Try using a different browser."
+
+    By contrast, stock headed Chromium on Xvfb with ONLY:
+      - `--disable-blink-features=AutomationControlled`
+      - `ignore_default_args=["--enable-automation"]`
+      - native Chromium User-Agent (no prototype Proxy tampering)
+    passes Google's sign-in checks cleanly while still keeping per-account
+    screen/window sizing and isolated `--user-data-dir` profiles.
     """
-    fp_obj = _dict_to_fingerprint(fp_data)
-    raw_js = InjectFunction(fp_obj)
-    # Prevent overrideStatic() from deleting window.SharedArrayBuffer.
-    # CRITICAL: BrowserForge's InjectFunction(fp) returns `(()=>{ ... })()`
-    # WITHOUT a trailing semicolon! If another `(() => { ... })()` is appended
-    # directly after it, JavaScript parses the two IIFEs as `(iife1)(iife2)`,
-    # which throws `TypeError: (intermediate value)(...) is not a function` and
-    # aborts the entire init script before `window.__PROVIDER_NAME__` runs!
-    patched_js = raw_js.replace("overrideStatic();", "/* overrideStatic() disabled for SharedArrayBuffer */").rstrip()
-    if not patched_js.endswith(";"):
-        patched_js += ";"
-    extra_js = """
-;(() => {
-  try {
-    if (!window.chrome) {
-      Object.defineProperty(window, 'chrome', {
-        value: { runtime: {}, app: { isInstalled: false } },
-        writable: true, enumerable: true, configurable: false
-      });
-    } else if (!window.chrome.runtime) {
-      window.chrome.runtime = {};
-    }
-  } catch (e) {}
-})();
+    scr = fp_data.get("screen", {})
+    w = int(scr.get("width", 1280))
+    h = int(scr.get("height", 720))
+    avail_w = int(scr.get("availWidth", w))
+    avail_h = int(scr.get("availHeight", h - 40))
+    color_depth = int(scr.get("colorDepth", 24))
+
+    return f"""
+;(() => {{
+  try {{
+    if (!window.chrome) {{
+      window.chrome = {{ runtime: {{}} }};
+    }} else if (!window.chrome.runtime) {{
+      window.chrome.runtime = {{}};
+    }}
+    const scrDefs = {{
+      width: {w}, height: {h},
+      availWidth: {avail_w}, availHeight: {avail_h},
+      colorDepth: {color_depth}, pixelDepth: {color_depth},
+    }};
+    for (const [k, v] of Object.entries(scrDefs)) {{
+      try {{ Object.defineProperty(Screen.prototype, k, {{ get: () => v, configurable: true }}); }} catch (e) {{}}
+    }}
+  }} catch (e) {{}}
+}})();
 """
-    return patched_js + "\n" + extra_js
 
 
 def build_context_headers(fp_data: Dict[str, Any]) -> Dict[str, str]:

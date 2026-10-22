@@ -225,7 +225,6 @@ def dismiss_interaction_modal(page: Page, logger=None) -> bool:
                     curr_x = max(iframe_box['x'] + 20, min(iframe_box['x'] + iframe_box['width'] - 20, curr_x + delta_x))
                     curr_y = max(iframe_box['y'] + 20, min(iframe_box['y'] + iframe_box['height'] - 20, curr_y + delta_y))
 
-                    page.bring_to_front()
                     page.mouse.move(curr_x, curr_y)
                     time.sleep(0.05)
 
@@ -255,8 +254,8 @@ def click_in_iframe(page: Page, logger=None) -> bool:
         # ================= 调整：父页面保活 (不点击，仅移动/按键) =================
         # 点击 iframe 外部会导致 iframe 失去焦点，从而可能引发 websocket 1001 断开错误。
         # 因此这里只移动鼠标、发送无害按键和滚动来保活父页面。
+        # 注意：不调用 page.bring_to_front()，避免在 VNC 中抢夺人工操作窗口的焦点。
         try:
-            page.bring_to_front()
             viewport = page.viewport_size
             if viewport:
                 move_x = random.randint(10, int(viewport['width']) - 10)
@@ -310,11 +309,9 @@ def click_in_iframe(page: Page, logger=None) -> bool:
             curr_x = max(int(safe_left), min(int(safe_right), curr_x + delta_x))
             curr_y = max(int(safe_top), min(int(safe_bottom), curr_y + delta_y))
 
-            page.bring_to_front()
             page.mouse.move(curr_x, curr_y)
             time.sleep(0.1)
 
-        page.bring_to_front()
         page.mouse.click(curr_x, curr_y)
         if logger:
             logger.debug("click_in_iframe: 成功完成鼠标移动和点击")

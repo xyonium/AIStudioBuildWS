@@ -217,7 +217,6 @@ def run_browser_instance(config, shutdown_event=None):
     # 注意:proxy 通过 launch_options["proxy"] 传(BrowserContext 层),不写 --proxy-server args
     # 否则 persistent_context 下 args 优先级更高会覆盖 bypass,并且与 Playwright 的 proxy error 处理冲突
 
-    extra_headers = build_context_headers(fp)
     nav_lang = (fp.get("navigator", {}).get("languages") or ["en-US"])[0]
 
     launch_options.update({
@@ -226,16 +225,18 @@ def run_browser_instance(config, shutdown_event=None):
         "args": chromium_args,
         # 移除 Playwright 默认注入的 --enable-automation 标志
         "ignore_default_args": ["--enable-automation", "--disable-features"],
-        # 通过 CDP 统一设置 User-Agent、Viewport、Locale、Client-Hints Headers，
-        # 避免 HTTP 请求头 / Worker 线程是 Linux Chromium 136 而页面 JS 是 Windows Chrome 的跨层分裂
-        "user_agent": fp["navigator"]["userAgent"],
+        # 严禁在此处传入 user_agent 或 extra_http_headers(sec-ch-ua*)！
+        # 根因：Google accounts.google.com 登录时会通过 JS/UACH 综合指纹校验真实二进制版本。
+        # 容器内真实 Chromium 是 136，若把 BrowserForge 生成的 Chrome 147 UA 或伪造的
+        # Navigator.prototype / WebGL Proxy 注入进去，Google 登录页会立即拦截并报错：
+        # "This browser or app may not be secure. Try using a different browser."
+        # 保持原生 Chromium UA 与原生 Navigator，仅靠 --disable-blink-features=AutomationControlled
+        # 和 --enable-automation 移除即可通过 Google 登录安全检查！
         "viewport": {
             "width": int(fp["screen"]["width"]),
             "height": int(fp["screen"]["height"]),
         },
-        "device_scale_factor": float(fp["screen"].get("devicePixelRatio", 1) or 1),
         "locale": nav_lang,
-        "extra_http_headers": extra_headers,
     })
 
     # =========================================================================
@@ -866,34 +867,13 @@ def run_browser_instance(config, shutdown_event=None):
                 return
 
         except KeepAliveError as e:
-            # 如果是 API 连续认证失败引发的重启，自动清理损坏的 Profile 缓存
-            # 注意：保留 fingerprint.json 保持指纹一致，保留 cookies.json 和旧 Firefox
-            # 数据库备份（以便重新从 cookies.json 恢复或进入停车等待，不破坏迁移资产）
+            # 注意：绝不清空 Chromium 的 Default/Cookies 持久化目录！
+            # 原因：Google 账号在容器内完成一次手动或自动登录后，其有效登录态（SIDTS/OSID）
+            # 保存在 Default/Cookies 中；而从旧 Firefox 导出的 cookies.json 里有些账号已经
+            # Signed out。如果因为 403 清空了 Default/Cookies，就会把好不容易登录好的账号
+            # 强行退回 Signed out 状态！
             if "API 连续认证失败" in str(e):
-                logger.warning(f"检测到 [{diagnostic_tag}] 凭证已失效，准备自动清空 Profile 缓存以重新初始化...")
-                _preserve_files = {
-                    "fingerprint.json",
-                    "fingerprint.camoufox.bak.json",
-                    "cookies.json",
-                    "cookies.sqlite",
-                    "cookies.sqlite-wal",
-                    "cookies.sqlite-shm",
-                }
-                try:
-                    import shutil
-                    for item in os.listdir(profile_dir):
-                        if item not in _preserve_files:
-                            item_path = os.path.join(profile_dir, item)
-                            if os.path.isdir(item_path):
-                                shutil.rmtree(item_path, ignore_errors=True)
-                            else:
-                                try:
-                                    os.remove(item_path)
-                                except Exception:
-                                    pass
-                    logger.info(f"成功清理 [{diagnostic_tag}] Profile 缓存 (指纹特征与迁移凭证已保留)")
-                except Exception as clean_e:
-                    logger.error(f"清理 [{diagnostic_tag}] Profile 缓存失败: {clean_e}")
+                logger.warning(f"检测到 [{diagnostic_tag}] API 连续认证失败，将重启浏览器实例刷新会话（保留现有登录态 Profile）...")
 
             retry_count += 1
             if retry_count > max_retries:

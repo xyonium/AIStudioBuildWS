@@ -166,8 +166,11 @@ def handle_successful_navigation(page: Page, logger, cookie_file_config, shutdow
             raise KeepAliveError("API 连续认证失败，重建会话")
 
         try:
-            # 强制页面唤醒以防由于遮挡被引擎休眠 (Occlusion sleep)
-            page.bring_to_front()
+            # 注意：已移除 page.bring_to_front()！
+            # Chromium 已通过 --disable-backgrounding-occluded-windows /
+            # --disable-renderer-backgrounding / --disable-background-timer-throttling
+            # 彻底关闭后台休眠。频繁调用 bring_to_front() 会在 X11/VNC 桌面上每 10 秒
+            # 轮流把 7 个窗口置顶抢走焦点，导致人工根本无法在 VNC 中输入账号密码登录。
 
             # 【URL守护】：检查是否偏离了目标页面（如误触导航到了Terms页等）
             if expected_path:
