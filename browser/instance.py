@@ -183,6 +183,7 @@ def run_browser_instance(config, shutdown_event=None):
     )
     chromium_args = [
         "--disable-blink-features=AutomationControlled",
+        "--test-type",  # 消除顶部 "--no-sandbox is unsupported" 黄色警告横幅
         "--no-first-run",
         "--no-default-browser-check",
         f"--window-size={fp['screen']['width']},{fp['screen']['height']}",
