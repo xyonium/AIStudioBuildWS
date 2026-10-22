@@ -33,6 +33,7 @@ Thumbs.db
 
 # AI files
 .claude/
+.codegraph/
 .serena/
 CLAUDE.md
 AGENTS.md

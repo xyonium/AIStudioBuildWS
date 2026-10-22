@@ -10,16 +10,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libdbus-1-3 libdrm2 libgbm1 libgtk-3-0 \
     libnspr4 libnss3 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 \
     libxext6 libxfixes3 libxrandr2 libxrender1 libxtst6 ca-certificates \
-    fonts-liberation libasound2 libpangocairo-1.0-0 libpango-1.0-0 libu2f-udev \
-    xvfb x11vnc fluxbox novnc websockify x11-utils xdotool wmctrl \
+    fonts-liberation fonts-noto-cjk libasound2 libpangocairo-1.0-0 libpango-1.0-0 libu2f-udev \
+    xvfb x11vnc fluxbox novnc websockify x11-utils xdotool wmctrl procps \
     && rm -rf /var/lib/apt/lists/*
 
 # 拷贝并安装 Python 依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 下载 camoufox
-RUN camoufox fetch
+# 下载 Chromium 及其所有 Linux 系统依赖(与 playwright install --with-deps 等价,
+# 但我们用 apt 只在镜像里装 chromium 运行时所需的最小集,里面已经包含了)。
+# 关键点:不下载 Firefox,也不下载 Sony/实验性的 webkit —— 我们只要 chromium。
+# --no-install-recommends + --with-deps 会在当前构建阶段装缺失的 libxcb/libPolly 等。
+RUN playwright install chromium
 
 # 将项目中的所有文件拷贝到工作目录
 COPY . .

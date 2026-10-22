@@ -5,19 +5,68 @@ import json
 import subprocess
 import gc
 from urllib.parse import urlparse
-from playwright.sync_api import TimeoutError, Error as PlaywrightError
+from playwright.sync_api import (
+    sync_playwright,
+    TimeoutError,
+    Error as PlaywrightError,
+)
 from utils.logger import setup_logging
 from utils.cookie_manager import CookieManager
 from browser.navigation import handle_successful_navigation, KeepAliveError
 from browser.cookie_validator import CookieValidator
 from browser.park_and_wait import park_and_wait
-from camoufox.sync_api import Camoufox
 from utils.paths import logs_dir
 from utils.common import parse_headless_mode, ensure_dir, clean_env_value
 from utils.url_helper import extract_url_path, mask_url_for_logging, mask_path_for_logging
-from camoufox.utils import launch_options as generate_launch_options
-from browserforge.fingerprints import Screen
 from browser.window_placer import place_window
+from browser.fingerprint import (
+    load_or_create_fingerprint,
+    build_injection_js,
+    build_context_headers,
+    ensure_profile_migrated,
+    load_migrated_cookies,
+    has_chromium_cookie_db,
+)
+
+
+class _ChromiumCtxMgr:
+    """Context manager wrapping sync_playwright().chromium.launch_persistent_context.
+
+    `Camoufox(**opts).__enter__()` previously returned a BrowserContext. This
+    adapter preserves that shape for callers: `with X(**opts) as context:`.
+
+    playwright is entered and owned by us; on exit we close the context and
+    then stop playwright, in that order, so that all browser processes are
+    terminated deterministically (Chromium child processes do not die on
+    parent SIGTERM alone).
+    """
+
+    def __init__(self, **kwargs):
+        self._kwargs = kwargs
+        self._pw = None
+        self._ctx = None
+
+    def __enter__(self):
+        self._pw = sync_playwright().start()
+        # launch_persistent_context always returns a BrowserContext; we don't
+        # need `.browser` (it will be None for persistent contexts).
+        self._ctx = self._pw.chromium.launch_persistent_context(**self._kwargs)
+        return self._ctx
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if self._ctx is not None:
+                self._ctx.close()
+        except Exception:
+            pass
+        try:
+            if self._pw is not None:
+                self._pw.stop()
+        except Exception:
+            pass
+        self._ctx = None
+        self._pw = None
+        return False
 
 
 def run_browser_instance(config, shutdown_event=None):
@@ -74,85 +123,120 @@ def run_browser_instance(config, shutdown_event=None):
 
     if proxy:
         logger.info(f"使用代理: {proxy} 访问")
+        # Chromium 也支持 launch_options["proxy"](BrowserContext 级别)。注意:
+        # 1. proxy 值应为字符串("http://h:p")或 dict;CookieManager 传的就是 str
+        # 2. bypass 域名列表用于跳过部分目标
         launch_options["proxy"] = {"server": proxy, "bypass": "localhost, 127.0.0.1"}
 
     screenshot_dir = logs_dir()
     ensure_dir(screenshot_dir)
 
-    # ================= [新增代码：多用户 Profile 和指纹管理] =================
-    profiles_base_dir = "/app/camoufox_profiles"
+    # ================= [多用户 Profile 和指纹管理 (Chromium migration)] =================
+    # Profile 根目录优先使用 CHROMIUM_PROFILE_ROOT；若未设置但已挂载 /app/chromium_profiles
+    # 则优先用 /app/chromium_profiles，否则兼容现有的 /app/camoufox_profiles 挂载。
+    _env_profile_root = clean_env_value(os.getenv("CHROMIUM_PROFILE_ROOT"))
+    if _env_profile_root:
+        profiles_base_dir = _env_profile_root
+    elif os.path.isdir("/app/chromium_profiles"):
+        profiles_base_dir = "/app/chromium_profiles"
+    else:
+        profiles_base_dir = "/app/camoufox_profiles"
     ensure_dir(profiles_base_dir)
 
     # 使用 identifier (如 USER_COOKIE_1) 作为文件夹名，实现多用户完全隔离
     profile_dir = os.path.join(profiles_base_dir, diagnostic_tag)
     ensure_dir(profile_dir)
 
-    fingerprint_file = os.path.join(profile_dir, "fingerprint.json")
-    if os.path.exists(fingerprint_file):
-        with open(fingerprint_file, "r") as f:
-            fingerprint_opts = json.load(f)
-        logger.info(f"已加载现有的环境指纹和 Profile: {profile_dir}")
-    else:
-        # ====== 新增/修改代码开始 ======
-        # 必须显式传入 screen 和 window 参数！
-        # 根因：Docker 中 get_screen_cons() 内部调用 get_monitors() 会静默失败
-        # （需要 xrandr，容器没装），导致 screen=None 传给 BrowserForge，
-        # 其默认 Windows 桌面分布的众数是 1680x1050，每次新生成的指纹都确定性偏大。
-        # screen 约束生成的 screen 尺寸上限，window 精确控制窗口大小。
-        fingerprint_opts = generate_launch_options(
-            user_data_dir=profile_dir,
-            os="windows",
-            screen=Screen(max_width=1440, max_height=900),
-            window=(1440, 900),
-        )
-        # ====== 新增/修改代码结束 ======
-        with open(fingerprint_file, "w") as f:
-            json.dump(fingerprint_opts, f, indent=4)
-        logger.info(f"已生成并锁定全新环境指纹: {profile_dir}")
+    # 若当前 profile 尚未生成 cookies.json 且存在旧 Camoufox 的 cookies.sqlite，
+    # 自动执行一次只读拷贝导出（含 WAL），确保无缝迁移登录态。
+    try:
+        mig_msg = ensure_profile_migrated(profile_dir, diagnostic_tag)
+        if mig_msg:
+            logger.info(f"[{diagnostic_tag}] 自动从旧 Camoufox profile 迁移 Cookie: {mig_msg}")
+    except Exception as mig_e:
+        logger.warning(f"[{diagnostic_tag}] 自动迁移旧 Cookie 时出错（将继续）: {mig_e}")
 
-    # 将指纹和持久化设置合并到 Camoufox 启动选项中
-    launch_options["from_options"] = fingerprint_opts
-    launch_options["persistent_context"] = True
-    launch_options["user_data_dir"] = profile_dir
+    # BrowserForge 指纹的第一次生成会被立即写盘锁定 → 后续同 profile 复用同一指纹。
+    # 若遇到旧版 Camoufox fingerprint.json 会先备份为 fingerprint.camoufox.bak.json。
+    fp = load_or_create_fingerprint(profile_dir)
+    logger.info(
+        f"[{diagnostic_tag}] fingerprint ready: "
+        f"ua={fp['navigator']['userAgent'][:60]}... "
+        f"screen={fp['screen']['width']}x{fp['screen']['height']}"
+    )
 
-    # [新增] 强制 Firefox 禁用后台资源冻结、标签页休眠和遮挡跟踪 (Occlusion Tracking)
-    # 这对多窗口/多标签页在无头环境下能否持续运行至关重要
-    launch_options["firefox_user_prefs"] = {
-        #"browser.tabs.unloadOnLowMemory": False,  # 禁用低内存卸载
-        "dom.min_background_timeout_value": 100,  # 维持后台计时器频率
-        "network.websocket.timeout": 0,  # 禁用WS超时
-        "page_visibility.dont_suspend_inactive": True,  # 防止非活动页面挂起
-        "dom.timeout.enable_budget_timer_fallback": False,
-        "widget.windows.window_occlusion_tracking.enabled": False,  # 禁用遮挡跟踪（如果窗口被遮挡，原本会挂起渲染）
-        #"gfx.webrender.dcomp-win.enabled": False,  # 关闭可能导致黑屏或不渲染的硬件加速遮挡        
-        # 1. 限制内存缓存容量（而非禁用）
-        # 禁用 browser.cache.memory 会同时关掉 Firefox 的 memory-pressure 回收机制，
-        # 反而导致 GC 变懒、RSS 只增不还；保留缓存但限制容量更稳
-        "browser.cache.memory.capacity": 65536,  # 内存缓存上限 64MB
-        #"browser.cache.disk.enable": False,       # 甚至可以禁止磁盘缓存，防止磁盘I/O导致延迟
-        # 2. 砍掉页面历史记录 (Session History)
-        # 非常关键！默认浏览器会记住50个页面的状态(为了按后退键能够秒开)，极其占内存
-        "browser.sessionhistory.max_entries": 2,  # 仅保留2个前进后退记录
-        "browser.sessionstore.max_tabs_undo": 0,  # 关闭"恢复关闭的标签页"功能
-        # 3. 强制激进的垃圾回收 (Garbage Collection & JS Memory)
-        "javascript.options.mem.max": 102400,     # 限制 JS 引擎最大使用内存阈值 (单位KB)
-        "javascript.options.mem.high_water_mark": 32, # 更低的水位线，更早触发GC
-        # 4. 优化图片与媒体内存消耗（如果你不需要看高清图片）
-        "image.mem.decodeondraw": True,           # 只有真正画出来的时候才解码图片
-        "image.mem.discardable": True,            # 允许释放掉未显示的图片内存
-        "image.mem.max_decoded_image_kb": 10240,  # 限制单张解码图片的最大内存 (10MB)
-        # 5. 严格限制子进程数量（防止它悄悄开多个辅助进程）
-        "dom.ipc.processCount": 1,                # 强制将网页内容进程数量限制在1个
-        "dom.ipc.processCount.extension": 1,      # 限制插件进程数
-        # 6. 禁用不需要的遥测和后台服务 (有效减少闲置内存占用)
-        "toolkit.telemetry.enabled": False,
-        "browser.ping-centre.telemetry": False,
-        "network.prefetch-next": False,           # 禁用链接预读取
-        "network.dns.disablePrefetch": True,      # 禁用 DNS 预解析
-        # 已回退：media.autoplay.default=5 和 image.animation_mode=none
-        # 这两条会让浏览器媒体/动图行为偏离真实用户，Google 反爬的行为指纹
-        # 一致性校验可能因此判 403，而 AI Studio 页面并无自动播放媒体，收益≈0
-    }
+    # ---- Chromium launch options ----
+    # Camoufox 的 headless 支持三态(True / False / 'virtual':Xvfb 由外部负责显示),
+    # 但纯 Playwright 只接受 bool。'virtual' 实际语义是"非 headless,由 Xvfb 提供显示",
+    # 对应到这里就等于 headless=False。
+    _hl = parse_headless_mode(headless_setting)
+    headless_parsed = (_hl is True)  # 'virtual' 和 False 都映射为 False
+
+    # 合并 Playwright 默认 disabledFeatures，避免被新的 --disable-features 覆盖
+    _pw_disabled_features = (
+        "AcceptCHFrame,AutoExpandDetailsElement,AvoidUnnecessaryBeforeUnloadCheckSync,"
+        "CertificateTransparencyComponentUpdater,DeferRendererTasksAfterInput,"
+        "DestroyProfileOnBrowserClose,DialMediaRouteProvider,ExtensionManifestV2Disabled,"
+        "GlobalMediaControls,HttpsUpgrades,ImprovedCookieControls,LazyFrameLoading,"
+        "LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,"
+        "TranslateUI,MemoryPurgeOnFreezing,OptimizationGuideModelDownloading"
+    )
+    chromium_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+        f"--window-size={fp['screen']['width']},{fp['screen']['height']}",
+        # ---- Camoufox 原本用 firefox_user_prefs 做的事,Chromium 等效: ----
+        # v8 内存压缩(代替 javascript.options.mem.max/high_water_mark)
+        "--js-flags=--max-old-space-size=384 --max-semi-space-size=16",
+        # 不要禁用 renderer background throttling 或 Chromium 会把后台 tab 掉线
+        # (AI Studio 如果不过 keep-alive 到 WS 就会 1001 掉线,生产已踩过)
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        # 禁用遥测与后台任务（合并 Playwright 默认禁用项，防止覆盖）
+        f"--disable-features={_pw_disabled_features}",
+        "--mute-audio",
+        "--disable-sync",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--metrics-recording-only",
+        "--password-store=basic",
+        "--no-service-autorun",
+        # DNS/Network 预解析等价于 network.prefetch-next=False
+        "--disable-domain-reliability",
+        "--disable-client-side-phishing-detection",
+        # 禁用 gpu 硬件加速(避免容器里缺 GPU 触发黑屏/崩)
+        "--disable-gpu",
+        "--disable-dev-shm-usage",  # /dev/shm 默认仅 64MB,Chromium 需要 fallback
+        # 避免 Chromium 尝试检测 occluded windows / 挂起(对应 page_visibility.dont_suspend_inactive)
+        "--disable-hang-monitor",
+        "--disable-prompt-on-repost",
+        "--disable-ipc-flooding-protection",
+    ]
+    # 注意:proxy 通过 launch_options["proxy"] 传(BrowserContext 层),不写 --proxy-server args
+    # 否则 persistent_context 下 args 优先级更高会覆盖 bypass,并且与 Playwright 的 proxy error 处理冲突
+
+    extra_headers = build_context_headers(fp)
+    nav_lang = (fp.get("navigator", {}).get("languages") or ["en-US"])[0]
+
+    launch_options.update({
+        "headless": headless_parsed,
+        "user_data_dir": profile_dir,
+        "args": chromium_args,
+        # 移除 Playwright 默认注入的 --enable-automation 标志
+        "ignore_default_args": ["--enable-automation", "--disable-features"],
+        # 通过 CDP 统一设置 User-Agent、Viewport、Locale、Client-Hints Headers，
+        # 避免 HTTP 请求头 / Worker 线程是 Linux Chromium 136 而页面 JS 是 Windows Chrome 的跨层分裂
+        "user_agent": fp["navigator"]["userAgent"],
+        "viewport": {
+            "width": int(fp["screen"]["width"]),
+            "height": int(fp["screen"]["height"]),
+        },
+        "device_scale_factor": float(fp["screen"].get("devicePixelRatio", 1) or 1),
+        "locale": nav_lang,
+        "extra_http_headers": extra_headers,
+    })
 
     # =========================================================================
     # 重启控制变量
@@ -190,10 +274,61 @@ def run_browser_instance(config, shutdown_event=None):
     #   2. 打开 page 供调用方 park_and_wait 停车。
     # 重建这一步会碰 Google 一次，这是用户明确接受的；它发生在**已经耗尽
     # 所有自动重试之后**，不会放大反爬信号。
+    def _inject_cookies_if_needed(target_context):
+        """仅在 Chromium 自身 Cookie 库尚未初始化时注入一次迁移/初始 Cookie。
+
+        关键原因：Google 的 SIDTS / SIDCC 等会话 Cookie 在运行期间高频滚动刷新并
+        保存在 Chromium 的 `<profile_dir>/Default/Cookies` 中。如果每次重启（如
+        每日 07:33 内存回收重启）都拿静态的 `cookies.json` 或环境变量里的初始
+        Cookie 重新调用 `add_cookies()`，会用几天前的旧值覆盖 Chromium 刷新后的
+        最新 Cookie，导致 Google 判定会话回放/异常而踢下线。
+        """
+        already_initialized = os.path.exists(os.path.join(profile_dir, ".chromium_cookies_seeded")) and has_chromium_cookie_db(profile_dir)
+        if already_initialized:
+            logger.info(f"[{diagnostic_tag}] 检测到 Chromium 持久化 Cookie 库已就绪，直接使用本地最新会话状态")
+            return
+
+        seeded_any = False
+        # 1. 先加载环境变量/cookies/*.json 中的基础配置
+        if cookies:
+            try:
+                target_context.add_cookies(cookies)
+                seeded_any = True
+            except Exception as ce:
+                logger.warning(f"[{diagnostic_tag}] 注入环境变量/文件初始 Cookie 时部分失败: {ce}")
+
+        # 2. 再加载从旧 Camoufox/Firefox profile 导出的完整登录态（优先级更高，覆盖同名占位符）
+        migrated_cookies = load_migrated_cookies(profile_dir)
+        if migrated_cookies:
+            logger.info(f"[{diagnostic_tag}] 首次初始化：加载 {len(migrated_cookies)} 条从 Firefox profile 迁移的 Cookie")
+            try:
+                target_context.add_cookies(migrated_cookies)
+                seeded_any = True
+            except Exception as me:
+                logger.warning(f"[{diagnostic_tag}] 批量注入迁移 Cookie 异常，尝试逐条注入: {me}")
+                ok_cnt = 0
+                for c in migrated_cookies:
+                    try:
+                        target_context.add_cookies([c])
+                        ok_cnt += 1
+                    except Exception:
+                        pass
+                logger.info(f"[{diagnostic_tag}] 逐条注入完成: {ok_cnt}/{len(migrated_cookies)} 条成功")
+                if ok_cnt > 0:
+                    seeded_any = True
+
+        if seeded_any:
+            try:
+                with open(os.path.join(profile_dir, ".chromium_cookies_seeded"), "w", encoding="utf-8") as sf:
+                    sf.write(str(time.time()))
+            except Exception:
+                pass
+
     def _relaunch_browser_for_park(reason_str):
         logger.warning(f"[{diagnostic_tag}] 浏览器已死（{reason_str}），正在重建以便停车等待人工...")
-        context_manager = Camoufox(**launch_options)
+        context_manager = _ChromiumCtxMgr(**launch_options)
         context = context_manager.__enter__()
+        _inject_cookies_if_needed(context)
 
         # 与正常启动保持一致的 provider 注入
         provider_name = cookie_source.display_name
@@ -203,7 +338,8 @@ def run_browser_instance(config, shutdown_event=None):
             c if c.isalnum() else "_" for c in provider_name.upper()
         )
         provider_name = clean_env_value(os.getenv(provider_name_override_env)) or provider_name
-        context.add_init_script(f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};")
+        _init_script = build_injection_js(fp) + "\n" + f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};"
+        context.add_init_script(_init_script)
 
         new_page = context.pages[0] if context.pages else context.new_page()
         return context_manager, context, new_page
@@ -219,17 +355,25 @@ def run_browser_instance(config, shutdown_event=None):
             # 强制 Python 垃圾回收，释放上一轮残留的 Playwright 对象
             gc.collect()
 
-            # 【安全修复】只清理属于当前 profile 的孤儿进程，避免误杀其他用户实例
-            # camoufox 启动命令中包含 -profile /app/camoufox_profiles/USER_COOKIE_X
-            # 注意：正则必须精确匹配完整目录名，否则 USER_COOKIE_1 会误杀
-            # USER_COOKIE_10/11（前缀匹配），引发多账户级联重启和 403
+            # 【安全修复】只清理属于当前 profile 的孤儿进程（含 crashpad_handler），避免误杀其他用户实例
+            # Chromium 主进程/renderer 含 --user-data-dir=<profile_dir>，
+            # chrome_crashpad_handler 含 --database=<profile_dir>/Crash Reports
+            # 注意：正则必须精确匹配完整目录名边界，否则 USER_COOKIE_1 会误杀 USER_COOKIE_10/11
             escaped_profile_dir = profile_dir.replace("/", "\\/")
             subprocess.run(
-                f"pkill -f 'camoufox-bin.*-profile {escaped_profile_dir}( |$)' || true",
+                f"pkill -f 'chrome.*(--user-data-dir|--database)={escaped_profile_dir}(/| |$)' || true",
                 shell=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
+            # 清理 Chromium 可能残留的 SingletonLock（容器重启或异常强杀后会导致无法启动）
+            for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                lock_path = os.path.join(profile_dir, lock_name)
+                if os.path.lexists(lock_path):
+                    try:
+                        os.unlink(lock_path)
+                    except Exception:
+                        pass
             time.sleep(2)  # 给 OS 一点时间回收内存
             logger.debug(f"已完成启动前清理（垃圾回收 + {diagnostic_tag} 僵尸进程清理）")
         except Exception:
@@ -237,14 +381,13 @@ def run_browser_instance(config, shutdown_event=None):
         # ====================================================
 
         try:
-            # === [修改代码：由于开启了持久化，Camoufox 返回的是 BrowserContext] ===
-            with Camoufox(**launch_options) as context:
+            # === 持久化上下文:Chromium launch_persistent_context 返回 BrowserContext ===
+            with _ChromiumCtxMgr(**launch_options) as context:
                 # 获取持久化上下文中已有的默认页面，如果没有则新建
                 page = context.pages[0] if context.pages else context.new_page()
 
-                # 依然兼容你现有的环境变量/JSON导入逻辑（当作初始凭证注入）
-                if cookies:
-                    context.add_cookies(cookies)
+                # 首次启动注入迁移/初始 Cookie；后续重启直接复用 Chromium Default/Cookies
+                _inject_cookies_if_needed(context)
 
                 # ====== 注入稳定的 provider 名称，供 AI Studio App 注册 CLIProxyAPI 时使用 ======
                 # App 代码在 Preview iframe 内通过 window.__PROVIDER_NAME__ 读取该值，
@@ -261,7 +404,8 @@ def run_browser_instance(config, shutdown_event=None):
                     c if c.isalnum() else "_" for c in provider_name.upper()
                 )
                 provider_name = clean_env_value(os.getenv(provider_name_override_env)) or provider_name
-                context.add_init_script(f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};")
+                _init_script = build_injection_js(fp) + "\n" + f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};"
+                context.add_init_script(_init_script)
                 logger.info(f"已注入 provider 名称: {provider_name}（可用环境变量 {provider_name_override_env} 覆盖）")
 
                 # 创建Cookie验证器 (原有代码不需要改，context 对象完美兼容)
@@ -723,13 +867,22 @@ def run_browser_instance(config, shutdown_event=None):
 
         except KeepAliveError as e:
             # 如果是 API 连续认证失败引发的重启，自动清理损坏的 Profile 缓存
-            # 注意：保留 fingerprint.json 保持指纹一致，只清理 session/cookies 缓存
+            # 注意：保留 fingerprint.json 保持指纹一致，保留 cookies.json 和旧 Firefox
+            # 数据库备份（以便重新从 cookies.json 恢复或进入停车等待，不破坏迁移资产）
             if "API 连续认证失败" in str(e):
                 logger.warning(f"检测到 [{diagnostic_tag}] 凭证已失效，准备自动清空 Profile 缓存以重新初始化...")
+                _preserve_files = {
+                    "fingerprint.json",
+                    "fingerprint.camoufox.bak.json",
+                    "cookies.json",
+                    "cookies.sqlite",
+                    "cookies.sqlite-wal",
+                    "cookies.sqlite-shm",
+                }
                 try:
                     import shutil
                     for item in os.listdir(profile_dir):
-                        if item != "fingerprint.json":
+                        if item not in _preserve_files:
                             item_path = os.path.join(profile_dir, item)
                             if os.path.isdir(item_path):
                                 shutil.rmtree(item_path, ignore_errors=True)
@@ -738,7 +891,7 @@ def run_browser_instance(config, shutdown_event=None):
                                     os.remove(item_path)
                                 except Exception:
                                     pass
-                    logger.info(f"成功清理 [{diagnostic_tag}] Profile 缓存 (指纹特征已保留)")
+                    logger.info(f"成功清理 [{diagnostic_tag}] Profile 缓存 (指纹特征与迁移凭证已保留)")
                 except Exception as clean_e:
                     logger.error(f"清理 [{diagnostic_tag}] Profile 缓存失败: {clean_e}")
 
