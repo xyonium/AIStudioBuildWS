@@ -338,7 +338,7 @@ def run_browser_instance(config, shutdown_event=None):
             c if c.isalnum() else "_" for c in provider_name.upper()
         )
         provider_name = clean_env_value(os.getenv(provider_name_override_env)) or provider_name
-        _init_script = build_injection_js(fp) + "\n" + f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};"
+        _init_script = f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};\n" + build_injection_js(fp)
         context.add_init_script(_init_script)
 
         new_page = context.pages[0] if context.pages else context.new_page()
@@ -404,7 +404,7 @@ def run_browser_instance(config, shutdown_event=None):
                     c if c.isalnum() else "_" for c in provider_name.upper()
                 )
                 provider_name = clean_env_value(os.getenv(provider_name_override_env)) or provider_name
-                _init_script = build_injection_js(fp) + "\n" + f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};"
+                _init_script = f"window.__PROVIDER_NAME__ = {json.dumps(provider_name)};\n" + build_injection_js(fp)
                 context.add_init_script(_init_script)
                 logger.info(f"已注入 provider 名称: {provider_name}（可用环境变量 {provider_name_override_env} 覆盖）")
 

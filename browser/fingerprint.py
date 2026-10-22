@@ -151,10 +151,17 @@ def build_injection_js(fp_data: Dict[str, Any]) -> str:
     """
     fp_obj = _dict_to_fingerprint(fp_data)
     raw_js = InjectFunction(fp_obj)
-    # Prevent overrideStatic() from deleting window.SharedArrayBuffer
-    patched_js = raw_js.replace("overrideStatic();", "/* overrideStatic() disabled for SharedArrayBuffer */")
+    # Prevent overrideStatic() from deleting window.SharedArrayBuffer.
+    # CRITICAL: BrowserForge's InjectFunction(fp) returns `(()=>{ ... })()`
+    # WITHOUT a trailing semicolon! If another `(() => { ... })()` is appended
+    # directly after it, JavaScript parses the two IIFEs as `(iife1)(iife2)`,
+    # which throws `TypeError: (intermediate value)(...) is not a function` and
+    # aborts the entire init script before `window.__PROVIDER_NAME__` runs!
+    patched_js = raw_js.replace("overrideStatic();", "/* overrideStatic() disabled for SharedArrayBuffer */").rstrip()
+    if not patched_js.endswith(";"):
+        patched_js += ";"
     extra_js = """
-(() => {
+;(() => {
   try {
     if (!window.chrome) {
       Object.defineProperty(window, 'chrome', {
