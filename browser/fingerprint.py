@@ -252,8 +252,14 @@ def export_cookies_from_firefox_db(db_path: str) -> List[Dict[str, Any]]:
     for name, value, host, path, expiry, is_secure, is_httponly, same_site in rows:
         if not _domain_matches(host or ""):
             continue
-        raw_ss = (int(same_site) & 0xFF) if same_site is not None else 0
-        ss = sameSite_map.get(raw_ss, "Lax")
+        # In Firefox moz_cookies, sameSite=256 means SAME_SITE_LAX_BY_DEFAULT
+        # (no explicit SameSite attribute was set; browser defaults to Lax).
+        # DO NOT mask `256 & 0xFF` (which evaluates to 0 -> "None"), because
+        # turning first-party cookies (SAPISID, __Secure-1PSID, __Host-1PLSID)
+        # into SameSite=None breaks Google's first-party vs third-party cookie
+        # semantics!
+        ss_int = int(same_site) if same_site is not None else 0
+        ss = sameSite_map.get(ss_int, "Lax")
         if ss == "None" and not is_secure:
             # Chromium refuses SameSite=None without Secure
             ss = "Lax"
@@ -267,13 +273,11 @@ def export_cookies_from_firefox_db(db_path: str) -> List[Dict[str, Any]]:
             exp_val = -1.0  # session cookie
 
         # Chromium strictness: __Host- cookies must NOT have a `domain` attribute
-        # in Playwright's add_cookies (must use `url` instead, or omit leading dot
-        # with path="/"). In Playwright, passing domain without leading dot for
-        # __Host- cookies or converting __Host- to `url` avoids rejection.
+        # in Playwright's add_cookies (must use `url` instead, and Playwright
+        # forbids passing both `url` and `path` at the same time!).
         cookie_dict: Dict[str, Any] = {
             "name": name,
             "value": value,
-            "path": path or "/",
             "expires": exp_val,
             "httpOnly": bool(is_httponly),
             "secure": bool(is_secure),
@@ -284,6 +288,7 @@ def export_cookies_from_firefox_db(db_path: str) -> List[Dict[str, Any]]:
             cookie_dict["url"] = f"https://{clean_host}{path or '/'}"
         else:
             cookie_dict["domain"] = host
+            cookie_dict["path"] = path or "/"
         cookies.append(cookie_dict)
     return cookies
 

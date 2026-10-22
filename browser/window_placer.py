@@ -172,10 +172,10 @@ def place_window(source_name: str, logger, win_w=_WIN_W, win_h=_WIN_H,
                 time.sleep(interval)
                 continue
 
-            # 已经在槽位附近就不再动（幂等）。容差要小于标题栏补偿量 39，
-            # 否则会把"差一个标题栏高"的窗口误判成已到位而跳过修正；
-            # 取 15px（大于 fluxbox 正常吸附的 1-2px）。
-            if abs(geo[0] - x) <= 15 and abs(geo[1] - y) <= 15:
+            # 已经在槽位附近就不再动（幂等）。
+            # Chromium 使用 CSD (无 fluxbox 标题栏)，wmctrl -e 设入的 cmd_y 会原样读回；
+            # Firefox 有 ~39px 标题栏补偿（读回 y）。两者都视为已到位。
+            if abs(geo[0] - x) <= 15 and (abs(geo[1] - y) <= 15 or abs(geo[1] - cmd_y) <= 15):
                 logger.debug(f"窗口已在槽位 {slot} 附近 ({geo[0]}, {geo[1]})，无需调整")
                 return True
 
@@ -183,7 +183,7 @@ def place_window(source_name: str, logger, win_w=_WIN_W, win_h=_WIN_H,
             time.sleep(0.5)
 
             new_geo = _window_geometry(win_id)
-            if new_geo and abs(new_geo[0] - x) <= 15 and abs(new_geo[1] - y) <= 15:
+            if new_geo and abs(new_geo[0] - x) <= 15 and (abs(new_geo[1] - y) <= 15 or abs(new_geo[1] - cmd_y) <= 15):
                 logger.info(f"窗口已归位到槽位 {slot}: ({new_geo[0]}, {new_geo[1]})")
                 return True
             # fluxbox 吸附/夹取导致没到位，下一轮重试
