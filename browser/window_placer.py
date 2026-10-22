@@ -14,11 +14,10 @@ _SCREEN_H = 1080
 _WIN_W = 1280
 _WIN_H = 772
 
-# 匹配浏览器主窗口标题的片段（Camoufox 标题后缀是 "— Camoufox"，
-# 普通 Firefox 是 "— Mozilla Firefox"，两者都兼容）。
+# 匹配浏览器主窗口标题的片段（Chromium / Chrome / Camoufox / Firefox 兼容）。
 # 空标题（页面还没加载出来的瞬间）也接受——反正归属靠 PID cmdline 精确匹配，
 # 标题只是用来排除明显的非浏览器窗口，重启早期标题可能是空的。
-_TITLE_HINTS = ("— Camoufox", "— Mozilla Firefox")
+_TITLE_HINTS = ("— Chromium", "- Chromium", "— Google Chrome", "- Google Chrome", "— Camoufox", "— Mozilla Firefox")
 
 # 一次最多摆放的实例槽位数（超过则回绕，一般不会超过）
 _MAX_SLOTS = 10
@@ -85,16 +84,20 @@ def _run(cmd, timeout=10):
 def _pid_matches_profile(pid: str, source_name: str) -> bool:
     """
     判断窗口所属进程是不是本实例：读 /proc/<pid>/cmdline，
-    匹配 camoufox 启动参数里的 -profile .../<source_name>。
+    兼容匹配：
+      1. Chromium: `--user-data-dir=.../<source_name>`
+      2. Camoufox/Firefox: `-profile .../<source_name>`
     路径结尾加边界匹配，避免 USER_COOKIE_1 误配 USER_COOKIE_10。
     """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             cmdline = f.read().replace(b"\0", b" ").decode("utf-8", "ignore")
-        return re.search(
-            r'-profile\s+\S*camoufox_profiles/' + re.escape(source_name) + r'(?:\s|$)',
-            cmdline,
-        ) is not None
+        esc = re.escape(source_name)
+        if re.search(r'--user-data-dir=\S*/' + esc + r'(?:\s|$)', cmdline):
+            return True
+        if re.search(r'-profile\s+\S*/' + esc + r'(?:\s|$)', cmdline):
+            return True
+        return False
     except Exception:
         return False
 

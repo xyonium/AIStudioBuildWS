@@ -205,8 +205,19 @@ FF_LEGACY_ROOT=/app/camoufox_profiles        # legacy source
 
 ---
 
-## 已知风险（我不是 100% 靠谱的部分）
+## 审核后加固项（Audit Fixes Applied）
 
-- Google 风控对 UA 突变（Firefox → Chromium）的敏感度未知，我 test 通过了 USER_COOKIE_7 但只跑了 ~3 min
-- BrowserForge 的指纹模板可能比 Camoufox 弱（Camoufox 是专门 anti-detect),Google 可能 detect headless-ish behavior。需要观察长期是否被 limit
-- Chromium renderer process 内存比 Firefox 单 process 模式占用高。7 个实例的 docker host 内存可能不够（用户需要观察)
+1. **移除 `ws_bridge.py` 诊断残留依赖**：`browser/instance.py` 已移除对未跟踪文件 `browser/ws_bridge.py` 的硬编码 import 与注入逻辑，确保容器镜像独立启动不报 `ModuleNotFoundError`。
+2. **指纹隔离全面对齐 BrowserForge 原生注入**：
+   - 生成指纹时显式约束 `Screen(min_width=1280, max_width=1440, min_height=720, max_height=900)`，匹配 `1920x1080` Xvfb 桌面。
+   - 序列化完整 `Fingerprint`（schema `browserforge-v2`，含 `navigator`、`screen`、`headers`、`videoCard`、`audioCodecs`、`videoCodecs`、`battery` 等），若遇到旧版 Camoufox `fingerprint.json` 自动备份为 `fingerprint.camoufox.bak.json`。
+   - `launch_persistent_context` 传入 CDP 级 `user_agent`、`viewport`、`device_scale_factor`、`locale`、`extra_http_headers`（含 `Sec-CH-UA*`）及 `ignore_default_args=["--enable-automation", "--disable-features"]`，消除 HTTP Header / Worker / 主线程 JS 之间的跨层分裂。
+   - 使用 BrowserForge 原生 `InjectFunction(fp)` 实现原型链级（`Navigator.prototype` / `Screen.prototype` / `userAgentData` / `overrideWebGl`）覆盖，并禁用 `overrideStatic()` 以保留 `window.SharedArrayBuffer`。
+3. **Cookie 迁移含 WAL 且仅首次种子化（防止覆盖滚动 Cookie）**：
+   - `export_cookies_from_firefox_db` 先将 `cookies.sqlite` + `-wal` + `-shm` 复制到临时目录再读取，避免 `immutable=1` 丢失 WAL 中最新滚动的 `SIDCC` / `__Secure-1PSIDTS`，并对 `__Host-` 前缀 Cookie 按 Playwright 规范转换为 `url` 属性。
+   - `instance.py` 启动时自动调用 `ensure_profile_migrated()`；当 Chromium 自身的 `Default/Cookies` 与 `.chromium_cookies_seeded` 已存在时，后续重启直接复用 Chromium 维护的最新会话，不再用静态 `cookies.json` 覆盖。
+   - `401/403` 清理 Profile 缓存时保留 `fingerprint.json`、`cookies.json` 与 `cookies.sqlite*`。
+4. **窗口归位与进程清理兼容 Chromium**：
+   - `browser/window_placer.py` 同时支持匹配 `--user-data-dir=.../<source_name>` 与旧 `-profile`。
+   - `pkill` 签名扩展为 `chrome.*(--user-data-dir|--database)=...`，同时清理孤儿 `chrome_crashpad_handler` 与残留 `SingletonLock`。
+   - `Dockerfile` 新增 `fonts-noto-cjk` 与 `procps`。
